@@ -10,6 +10,7 @@ jobs:
   check:
     name: Check (1.59.0)
     runs-on: ubuntu-latest
+    if: github.repository != 'rust-lang/rustc-rayon'
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@1.59.0
@@ -23,8 +24,8 @@ jobs:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --verbose
-      - run: cargo test --verbose --package rayon
-      - run: cargo test --verbose --package rayon-core
+      - run: cargo test --verbose --package rustc-rayon
+      - run: cargo test --verbose --package rustc-rayon-core
       - run: ./ci/highlander.sh
 
   fmt:
