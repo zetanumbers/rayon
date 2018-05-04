@@ -3,6 +3,7 @@ use crate::latch::{AsCoreLatch, CoreLatch, CountLatch, Latch, LatchRef, LockLatc
 use crate::log::Event::*;
 use crate::log::Logger;
 use crate::sleep::Sleep;
+use crate::tlv::Tlv;
 use crate::unwind;
 use crate::{
     ErrorKind, ExitHandler, PanicHandler, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder,
@@ -535,6 +536,7 @@ impl Registry {
             // This thread isn't a member of *any* thread pool, so just block.
             debug_assert!(WorkerThread::current().is_null());
             let job = StackJob::new(
+                Tlv::null(),
                 |injected| {
                     let worker_thread = WorkerThread::current();
                     assert!(injected && !worker_thread.is_null());
@@ -563,6 +565,7 @@ impl Registry {
         debug_assert!(current_thread.registry().id() != self.id());
         let latch = SpinLatch::cross(current_thread);
         let job = StackJob::new(
+            Tlv::null(),
             |injected| {
                 let worker_thread = WorkerThread::current();
                 assert!(injected && !worker_thread.is_null());

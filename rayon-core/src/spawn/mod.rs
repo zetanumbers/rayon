@@ -1,5 +1,6 @@
 use crate::job::*;
 use crate::registry::Registry;
+use crate::tlv::Tlv;
 use crate::unwind;
 use std::mem;
 use std::sync::Arc;
@@ -91,7 +92,7 @@ where
     // executed. This ref is decremented at the (*) below.
     registry.increment_terminate_count();
 
-    HeapJob::new({
+    HeapJob::new(Tlv::null(), {
         let registry = Arc::clone(registry);
         move || {
             registry.catch_unwind(func);
