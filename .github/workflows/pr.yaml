@@ -27,6 +27,7 @@ jobs:
       - run: cargo test --verbose --package rustc-rayon
       - run: cargo test --verbose --package rustc-rayon-core
       - run: ./ci/highlander.sh
+        if: github.repository != 'rust-lang/rustc-rayon'
 
   fmt:
     name: Format
