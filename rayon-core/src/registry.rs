@@ -10,6 +10,7 @@ use crate::{
     ReleaseThreadHandler, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
 };
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
+use smallvec::SmallVec;
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
@@ -840,14 +841,83 @@ impl WorkerThread {
     /// stealing tasks as necessary.
     #[inline]
     pub(super) unsafe fn wait_until<L: AsCoreLatch + ?Sized>(&self, latch: &L) {
+        self.wait_or_steal_until(latch, false)
+    }
+
+    /// Wait until the latch is set. Executes local jobs if `is_job` is true for them and
+    /// `all_jobs_started` still returns false.
+    #[inline]
+    pub(super) unsafe fn wait_for_jobs<L: AsCoreLatch + ?Sized, const BROADCAST_JOBS: bool>(
+        &self,
+        latch: &L,
+        mut all_jobs_started: impl FnMut() -> bool,
+        mut is_job: impl FnMut(&JobRef) -> bool,
+        mut execute_job: impl FnMut(JobRef),
+    ) {
+        let mut jobs = SmallVec::<[JobRef; 8]>::new();
+        let mut broadcast_jobs = SmallVec::<[JobRef; 8]>::new();
+
+        // Make sure all jobs have started.
+        while !all_jobs_started() {
+            if let Some(job) = self.worker.pop() {
+                if is_job(&job) {
+                    // Found a job, let's run it.
+                    execute_job(job);
+                } else {
+                    jobs.push(job);
+                }
+            } else {
+                if BROADCAST_JOBS {
+                    let broadcast_job = loop {
+                        match self.stealer.steal() {
+                            Steal::Success(job) => break Some(job),
+                            Steal::Empty => break None,
+                            Steal::Retry => {}
+                        }
+                    };
+                    if let Some(job) = broadcast_job {
+                        if is_job(&job) {
+                            // Found a job, let's run it.
+                            self.execute(job);
+                        } else {
+                            broadcast_jobs.push(job);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        // Restore the jobs that we weren't looking for.
+        for job in jobs.into_iter().rev() {
+            self.worker.push(job);
+        }
+        if BROADCAST_JOBS {
+            let broadcasts = self.registry.broadcasts.lock().unwrap();
+            for job in broadcast_jobs.into_iter() {
+                broadcasts[self.index].push(job);
+            }
+        }
+
+        // Wait for the jobs to finish.
+        self.wait_until(latch);
+        debug_assert!(latch.as_core_latch().probe());
+    }
+
+    #[inline]
+    pub(super) unsafe fn wait_or_steal_until<L: AsCoreLatch + ?Sized>(
+        &self,
+        latch: &L,
+        steal: bool,
+    ) {
         let latch = latch.as_core_latch();
         if !latch.probe() {
-            self.wait_until_cold(latch);
+            self.wait_until_cold(latch, steal);
         }
     }
 
     #[cold]
-    unsafe fn wait_until_cold(&self, latch: &CoreLatch) {
+    unsafe fn wait_until_cold(&self, latch: &CoreLatch, steal: bool) {
         // the code below should swallow all panics and hence never
         // unwind; but if something does wrong, we want to abort,
         // because otherwise other code in rayon may assume that the
@@ -857,15 +927,17 @@ impl WorkerThread {
 
         let mut idle_state = self.registry.sleep.start_looking(self.index, latch);
         while !latch.probe() {
-            if let Some(job) = self.find_work() {
-                self.registry.sleep.work_found(idle_state);
-                self.execute(job);
-                idle_state = self.registry.sleep.start_looking(self.index, latch);
-            } else {
-                self.registry
-                    .sleep
-                    .no_work_found(&mut idle_state, latch, &self)
+            if steal {
+                if let Some(job) = self.find_work() {
+                    self.registry.sleep.work_found(idle_state);
+                    self.execute(job);
+                    idle_state = self.registry.sleep.start_looking(self.index, latch);
+                    continue;
+                }
             }
+            self.registry
+                .sleep
+                .no_work_found(&mut idle_state, latch, &self, steal);
         }
 
         // If we were sleepy, we are not anymore. We "found work" --
@@ -988,7 +1060,7 @@ unsafe fn main_loop(thread: ThreadBuilder) {
         terminate_addr: my_terminate_latch.as_core_latch().addr(),
     });
     registry.acquire_thread();
-    worker_thread.wait_until(my_terminate_latch);
+    worker_thread.wait_or_steal_until(my_terminate_latch, true);
 
     // Should not be any work left in our queue.
     debug_assert!(worker_thread.take_local_job().is_none());

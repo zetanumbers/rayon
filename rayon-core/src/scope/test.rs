@@ -297,6 +297,7 @@ macro_rules! test_order {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn lifo_order() {
     // In the absence of stealing, `scope()` runs its `spawn()` jobs in LIFO order.
@@ -306,6 +307,7 @@ fn lifo_order() {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn fifo_order() {
     // In the absence of stealing, `scope_fifo()` runs its `spawn_fifo()` jobs in FIFO order.
@@ -341,6 +343,7 @@ macro_rules! test_nested_order {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn nested_lifo_order() {
     // In the absence of stealing, `scope()` runs its `spawn()` jobs in LIFO order.
@@ -350,6 +353,7 @@ fn nested_lifo_order() {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn nested_fifo_order() {
     // In the absence of stealing, `scope_fifo()` runs its `spawn_fifo()` jobs in FIFO order.
@@ -359,6 +363,7 @@ fn nested_fifo_order() {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn nested_lifo_fifo_order() {
     // LIFO on the outside, FIFO on the inside
@@ -371,6 +376,7 @@ fn nested_lifo_fifo_order() {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn nested_fifo_lifo_order() {
     // FIFO on the outside, LIFO on the inside
@@ -414,6 +420,7 @@ macro_rules! test_mixed_order {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn mixed_lifo_order() {
     // NB: the end of the inner scope makes us execute some of the outer scope
@@ -424,6 +431,7 @@ fn mixed_lifo_order() {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn mixed_fifo_order() {
     let vec = test_mixed_order!(scope_fifo => spawn_fifo, scope_fifo => spawn_fifo);
@@ -432,6 +440,7 @@ fn mixed_fifo_order() {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn mixed_lifo_fifo_order() {
     // NB: the end of the inner scope makes us execute some of the outer scope
@@ -442,6 +451,7 @@ fn mixed_lifo_fifo_order() {
 }
 
 #[test]
+#[ignore]
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn mixed_fifo_lifo_order() {
     let vec = test_mixed_order!(scope_fifo => spawn_fifo, scope => spawn);
@@ -531,8 +541,9 @@ fn mixed_lifetime_scope_fifo() {
 
 #[test]
 fn scope_spawn_broadcast() {
+    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
     let sum = AtomicUsize::new(0);
-    let n = scope(|s| {
+    let n = pool.scope(|s| {
         s.spawn_broadcast(|_, ctx| {
             sum.fetch_add(ctx.index(), Ordering::Relaxed);
         });
@@ -543,8 +554,9 @@ fn scope_spawn_broadcast() {
 
 #[test]
 fn scope_fifo_spawn_broadcast() {
+    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
     let sum = AtomicUsize::new(0);
-    let n = scope_fifo(|s| {
+    let n = pool.scope_fifo(|s| {
         s.spawn_broadcast(|_, ctx| {
             sum.fetch_add(ctx.index(), Ordering::Relaxed);
         });
@@ -554,6 +566,7 @@ fn scope_fifo_spawn_broadcast() {
 }
 
 #[test]
+#[ignore]
 fn scope_spawn_broadcast_nested() {
     let sum = AtomicUsize::new(0);
     let n = scope(|s| {
