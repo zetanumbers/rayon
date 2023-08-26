@@ -177,11 +177,6 @@ impl<'r> SpinLatch<'r> {
             ..SpinLatch::new(thread)
         }
     }
-
-    #[inline]
-    pub(super) fn probe(&self) -> bool {
-        self.core_latch.probe()
-    }
 }
 
 impl<'r> AsCoreLatch for SpinLatch<'r> {
