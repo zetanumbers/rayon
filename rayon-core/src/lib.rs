@@ -73,8 +73,6 @@ use std::str::FromStr;
 use std::thread;
 
 #[macro_use]
-mod log;
-#[macro_use]
 mod private;
 
 mod broadcast;

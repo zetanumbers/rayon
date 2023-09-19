@@ -1,7 +1,5 @@
 use crate::job::{JobFifo, JobRef, StackJob};
 use crate::latch::{AsCoreLatch, CoreLatch, Latch, LatchRef, LockLatch, OnceLatch, SpinLatch};
-use crate::log::Event::*;
-use crate::log::Logger;
 use crate::sleep::Sleep;
 use crate::tlv::Tlv;
 use crate::unwind;
@@ -131,7 +129,6 @@ where
 }
 
 pub struct Registry {
-    logger: Logger,
     thread_infos: Vec<ThreadInfo>,
     sleep: Sleep,
     injected_jobs: Injector<JobRef>,
@@ -284,11 +281,9 @@ impl Registry {
             })
             .unzip();
 
-        let logger = Logger::new(n_threads);
         let registry = Arc::new(Registry {
-            logger: logger.clone(),
             thread_infos: stealers.into_iter().map(ThreadInfo::new).collect(),
-            sleep: Sleep::new(logger, n_threads),
+            sleep: Sleep::new(n_threads),
             injected_jobs: Injector::new(),
             broadcasts: Mutex::new(broadcasts),
             terminate_count: AtomicUsize::new(1),
@@ -370,11 +365,6 @@ impl Registry {
         }
     }
 
-    #[inline]
-    pub(super) fn log(&self, event: impl FnOnce() -> crate::log::Event) {
-        self.logger.log(event)
-    }
-
     pub(super) fn num_threads(&self) -> usize {
         self.thread_infos.len()
     }
@@ -446,8 +436,6 @@ impl Registry {
     /// whatever worker has nothing to do. Use this if you know that
     /// you are not on a worker of this registry.
     pub(super) fn inject(&self, injected_job: JobRef) {
-        self.log(|| JobsInjected { count: 1 });
-
         // It should not be possible for `state.terminate` to be true
         // here. It is only set to true when the user creates (and
         // drops) a `ThreadPool`; and, in that case, they cannot be
@@ -462,22 +450,17 @@ impl Registry {
         let queue_was_empty = self.injected_jobs.is_empty();
 
         self.injected_jobs.push(injected_job);
-        self.sleep.new_injected_jobs(usize::MAX, 1, queue_was_empty);
+        self.sleep.new_injected_jobs(1, queue_was_empty);
     }
 
     pub(crate) fn has_injected_job(&self) -> bool {
         !self.injected_jobs.is_empty()
     }
 
-    fn pop_injected_job(&self, worker_index: usize) -> Option<JobRef> {
+    fn pop_injected_job(&self) -> Option<JobRef> {
         loop {
             match self.injected_jobs.steal() {
-                Steal::Success(job) => {
-                    self.log(|| JobUninjected {
-                        worker: worker_index,
-                    });
-                    return Some(job);
-                }
+                Steal::Success(job) => return Some(job),
                 Steal::Empty => return None,
                 Steal::Retry => {}
             }
@@ -491,9 +474,6 @@ impl Registry {
     /// **Panics** if not given exactly as many jobs as there are threads.
     pub(super) fn inject_broadcast(&self, injected_jobs: impl ExactSizeIterator<Item = JobRef>) {
         assert_eq!(self.num_threads(), injected_jobs.len());
-        self.log(|| JobBroadcast {
-            count: self.num_threads(),
-        });
         {
             let broadcasts = self.broadcasts.lock().unwrap();
 
@@ -567,9 +547,6 @@ impl Registry {
             self.release_thread();
             job.latch.wait_and_reset(); // Make sure we can use the same latch again next time.
             self.acquire_thread();
-
-            // flush accumulated logs as we exit the thread
-            self.logger.log(|| Flush);
 
             job.into_result()
         })
@@ -776,11 +753,6 @@ impl WorkerThread {
         &self.registry
     }
 
-    #[inline]
-    pub(super) fn log(&self, event: impl FnOnce() -> crate::log::Event) {
-        self.registry.logger.log(event)
-    }
-
     /// Our index amongst the worker threads (ranges from `0..self.num_threads()`).
     #[inline]
     pub(super) fn index(&self) -> usize {
@@ -789,12 +761,9 @@ impl WorkerThread {
 
     #[inline]
     pub(super) unsafe fn push(&self, job: JobRef) {
-        self.log(|| JobPushed { worker: self.index });
         let queue_was_empty = self.worker.is_empty();
         self.worker.push(job);
-        self.registry
-            .sleep
-            .new_internal_jobs(self.index, 1, queue_was_empty);
+        self.registry.sleep.new_internal_jobs(1, queue_was_empty);
     }
 
     #[inline]
@@ -816,7 +785,6 @@ impl WorkerThread {
         let popped_job = self.worker.pop();
 
         if popped_job.is_some() {
-            self.log(|| JobPopped { worker: self.index });
             return popped_job;
         }
 
@@ -860,10 +828,10 @@ impl WorkerThread {
                 continue;
             }
 
-            let mut idle_state = self.registry.sleep.start_looking(self.index, latch);
+            let mut idle_state = self.registry.sleep.start_looking(self.index);
             while !latch.probe() {
                 if let Some(job) = self.find_work() {
-                    self.registry.sleep.work_found(idle_state);
+                    self.registry.sleep.work_found();
                     self.execute(job);
                     // The job might have injected local work, so go back to the outer loop.
                     continue 'outer;
@@ -876,14 +844,10 @@ impl WorkerThread {
 
             // If we were sleepy, we are not anymore. We "found work" --
             // whatever the surrounding thread was doing before it had to wait.
-            self.registry.sleep.work_found(idle_state);
+            self.registry.sleep.work_found();
             break;
         }
 
-        self.log(|| ThreadSawLatchSet {
-            worker: self.index,
-            latch_addr: latch.addr(),
-        });
         mem::forget(abort_guard); // successful execution, do not abort
     }
 
@@ -895,7 +859,7 @@ impl WorkerThread {
         // we take on something new.
         self.take_local_job()
             .or_else(|| self.steal())
-            .or_else(|| self.registry.pop_injected_job(self.index))
+            .or_else(|| self.registry.pop_injected_job())
     }
 
     pub(super) fn yield_now(&self) -> Yield {
@@ -947,13 +911,7 @@ impl WorkerThread {
                 .find_map(|victim_index| {
                     let victim = &thread_infos[victim_index];
                     match victim.stealer.steal() {
-                        Steal::Success(job) => {
-                            self.log(|| JobStolen {
-                                worker: self.index,
-                                victim: victim_index,
-                            });
-                            Some(job)
-                        }
+                        Steal::Success(job) => Some(job),
                         Steal::Empty => None,
                         Steal::Retry => {
                             retry = true;
@@ -990,10 +948,6 @@ unsafe fn main_loop(thread: ThreadBuilder) {
     }
 
     let my_terminate_latch = &registry.thread_infos[index].terminate;
-    worker_thread.log(|| ThreadStart {
-        worker: index,
-        terminate_addr: my_terminate_latch.as_core_latch().addr(),
-    });
     registry.acquire_thread();
     worker_thread.wait_until(my_terminate_latch);
 
@@ -1005,8 +959,6 @@ unsafe fn main_loop(thread: ThreadBuilder) {
 
     // Normal termination, do not abort.
     mem::forget(abort_guard);
-
-    worker_thread.log(|| ThreadTerminate { worker: index });
 
     // Inform a user callback that we exited a thread.
     if let Some(ref handler) = registry.exit_handler {
