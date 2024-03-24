@@ -56,6 +56,7 @@ struct ScopeBase<'scope> {
     /// all of which outlive `'scope`.  They're not actually required to be
     /// `Sync`, but it's still safe to let the `Scope` implement `Sync` because
     /// the closures are only *moved* across threads to be executed.
+    #[allow(clippy::type_complexity)]
     marker: PhantomData<Box<dyn FnOnce(&Scope<'scope>) + Send + Sync + 'scope>>,
 
     /// The TLV at the scope's creation. Used to set the TLV for spawned jobs.
