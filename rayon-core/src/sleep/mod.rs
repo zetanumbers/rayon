@@ -8,7 +8,6 @@ use crossbeam_utils::CachePadded;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
 use std::thread;
-use std::usize;
 
 mod counters;
 pub(crate) use self::counters::THREADS_MAX;
