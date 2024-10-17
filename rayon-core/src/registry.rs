@@ -9,7 +9,9 @@ use crate::{
     AcquireThreadHandler, DeadlockHandler, ErrorKind, ExitHandler, PanicHandler,
     ReleaseThreadHandler, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
 };
+use corosensei::Fiber;
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
+use crossbeam_utils::atomic::AtomicCell;
 use smallvec::SmallVec;
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
@@ -19,7 +21,8 @@ use std::io;
 use std::mem;
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{mpsc, Arc, Mutex, Once};
+use std::task::Wake;
 use std::thread;
 use std::usize;
 
@@ -707,6 +710,9 @@ impl ThreadInfo {
 /// WorkerThread identifiers
 
 pub(super) struct WorkerThread {
+    /// awoken active fibers
+    fibers: mpsc::Receiver<mpsc::Receiver<Fiber<()>>>,
+
     /// the "worker" half of our local deque
     worker: Worker<JobRef>,
 
@@ -1142,5 +1148,41 @@ impl XorShift64Star {
     /// Return a value from `0..n`.
     fn next_usize(&self, n: usize) -> usize {
         (self.next() % n as u64) as usize
+    }
+}
+
+// TODO: handle unwinds
+
+// This passthrough channel structure is reasonable because we detect immediate wake via matching on
+// `TryRecvError::Empty` after we call `try_recv` on the incoming receiver, while
+// `TryRecvError::Disconnect`, which is caused by dropping every associated waker, is ignored due to
+// fibers not having any reasonable cleanup, for example in case of if we stumble upon the
+// `future::pending`.
+// TODO: consider unwinding a fiber when every associated waker is dropped before waking it up.
+// Should it be regulated by a parameter?
+struct FiberWakerState {
+    rx: mpsc::Receiver<Fiber<()>>,
+    passthrough_tx: mpsc::SyncSender<mpsc::Receiver<Fiber<()>>>,
+}
+
+// SAFETY: `FiberWakerState` is only used via waker, which does not opperate on fibers, but simply
+// passes receiver to the sender. It's fine to send fibers to other thread without operating on them
+// because their drop is a noop.
+unsafe impl Sync for FiberWakerState {}
+unsafe impl Send for FiberWakerState {}
+
+struct FiberWakerShared {
+    state: AtomicCell<Option<FiberWakerState>>,
+}
+
+impl Wake for FiberWakerShared {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if let Some(state) = self.state.take() {
+            state.passthrough_tx.send(state.rx);
+        }
     }
 }
