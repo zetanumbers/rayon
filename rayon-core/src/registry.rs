@@ -9,11 +9,12 @@ use crate::{
     AcquireThreadHandler, DeadlockHandler, ErrorKind, ExitHandler, PanicHandler,
     ReleaseThreadHandler, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
 };
+use corosensei::stack::DefaultStack;
 use corosensei::Fiber;
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use crossbeam_utils::atomic::AtomicCell;
 use smallvec::SmallVec;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::Hasher;
@@ -711,7 +712,10 @@ impl ThreadInfo {
 
 pub(super) struct WorkerThread {
     /// awoken active fibers
-    fibers: mpsc::Receiver<mpsc::Receiver<Fiber<()>>>,
+    fibers: mpsc::Receiver<mpsc::Receiver<Fiber<Switch>>>,
+
+    fiber_scheduler: mpsc::SyncSender<mpsc::Receiver<Fiber<Switch>>>,
+    free_stacks: RefCell<Vec<DefaultStack>>,
 
     /// the "worker" half of our local deque
     worker: Worker<JobRef>,
@@ -933,13 +937,33 @@ impl WorkerThread {
 
         let mut idle_state = self.registry.sleep.start_looking(self.index, latch);
         while !latch.probe() {
-            if steal {
-                if let Some(job) = self.find_work() {
-                    self.registry.sleep.work_found(idle_state);
-                    self.execute(job);
-                    idle_state = self.registry.sleep.start_looking(self.index, latch);
+            match self.fibers.try_recv() {
+                Ok(rx) => {
+                    let fiber = match rx.try_recv() {
+                        Ok(f) => f,
+                        Err(mpsc::TryRecvError::Empty) => continue,
+                        Err(mpsc::TryRecvError::Disconnected) => unreachable!(),
+                    };
+                    let switch = fiber.switch(Switch::Running);
+                    match switch {
+                        Switch::Running(fiber) => todo!(),
+                        Switch::Finished(default_stack) => todo!(),
+                    }
                     continue;
                 }
+                Err(mpsc::TryRecvError::Disconnected) => unreachable!(),
+                Err(mpsc::TryRecvError::Empty) => (),
+            }
+
+            if let Some(job) = self.find_work() {
+                self.registry.sleep.work_found(idle_state);
+                if steal {
+                    self.execute(job);
+                } else {
+                    todo!()
+                }
+                idle_state = self.registry.sleep.start_looking(self.index, latch);
+                continue;
             }
             self.registry
                 .sleep
@@ -992,6 +1016,18 @@ impl WorkerThread {
     #[inline]
     pub(super) unsafe fn execute(&self, job: JobRef) {
         job.execute();
+    }
+
+    fn switch(&self, fiber: Fiber<Switch>) {
+        let this = ptr::addr_of!(*self);
+        let switch = fiber.switch(|parent| {
+            let ;
+            Switch
+        });
+        match switch {
+            Switch::Running(fiber) => todo!(),
+            Switch::Finished(stack) => self.free_stacks.borrow_mut().push(stack),
+        }
     }
 
     /// Try to steal a single job and return it.
@@ -1161,8 +1197,8 @@ impl XorShift64Star {
 // TODO: consider unwinding a fiber when every associated waker is dropped before waking it up.
 // Should it be regulated by a parameter?
 struct FiberWakerState {
-    rx: mpsc::Receiver<Fiber<()>>,
-    passthrough_tx: mpsc::SyncSender<mpsc::Receiver<Fiber<()>>>,
+    rx: mpsc::Receiver<Fiber<Switch>>,
+    passthrough_tx: mpsc::SyncSender<mpsc::Receiver<Fiber<Switch>>>,
 }
 
 // SAFETY: `FiberWakerState` is only used via waker, which does not opperate on fibers, but simply
@@ -1186,3 +1222,5 @@ impl Wake for FiberWakerShared {
         }
     }
 }
+
+struct Switch;
