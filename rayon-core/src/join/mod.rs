@@ -1,5 +1,5 @@
 use crate::job::StackJob;
-use crate::latch::SpinLatch;
+use crate::latch::{AsCoreLatch, SpinLatch};
 use crate::registry::{self, WorkerThread};
 use crate::tlv::{self, Tlv};
 use crate::unwind;
@@ -165,7 +165,7 @@ where
                     let result_b = job_b.run_inline(injected);
                     return (result_a, result_b);
                 } else {
-                    worker_thread.execute(job);
+                    worker_thread.execute(job, job_b.latch.as_core_latch());
                 }
             } else {
                 // Local deque is empty. Time to steal from other

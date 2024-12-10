@@ -1,10 +1,13 @@
+use std::cell::UnsafeCell;
 use std::marker::PhantomData;
+use std::mem::{self, take, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::usize;
+use std::{ptr, usize};
 
-use crate::registry::{Registry, WorkerThread};
+use crate::job::JobRef;
+use crate::registry::{FiberWaker, Registry, WorkerThread};
 
 /// We define various kinds of latches, which are all a primitive signaling
 /// mechanism. A latch starts as false. Eventually someone calls `set()` and
@@ -52,6 +55,10 @@ pub(super) trait Latch {
 
 pub(super) trait AsCoreLatch {
     fn as_core_latch(&self) -> &CoreLatch;
+}
+
+pub(super) trait AsFiberLatch {
+    fn as_fiber_latch(&self) -> &FiberLatch;
 }
 
 /// Latch is not set, owning thread is awake
@@ -139,6 +146,50 @@ impl CoreLatch {
     #[inline]
     pub(super) fn probe(&self) -> bool {
         self.state.load(Ordering::Acquire) == SET
+    }
+}
+
+pub(super) struct FiberLatch {
+    core_latch: CoreLatch,
+    wakers: Mutex<Vec<FiberWaker>>,
+}
+
+impl FiberLatch {
+    #[inline]
+    pub(super) fn new() -> Self {
+        FiberLatch {
+            core_latch: CoreLatch::new(),
+            wakers: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Test if this latch has been set.
+    #[inline]
+    pub(super) fn probe(&self) -> bool {
+        self.core_latch.probe()
+    }
+
+    #[inline]
+    /// Await on the current fiber until latch is set.
+    pub(super) fn await_(&self, worker_thread: &WorkerThread) {
+        if self.probe() {
+            return;
+        }
+
+        let (tx, waker) = worker_thread.fibers.create_waker();
+
+        if self.probe() {}
+    }
+}
+
+impl Latch for FiberLatch {
+    #[inline]
+    pub(super) unsafe fn set(this: *const Self) {
+        CoreLatch::set(ptr::addr_of!((*this).core_latch));
+        let wakers = take(&mut *(*this).wakers.lock().unwrap());
+        for waker in wakers {
+            waker.wake();
+        }
     }
 }
 

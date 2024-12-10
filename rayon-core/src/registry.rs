@@ -9,16 +9,18 @@ use crate::{
     AcquireThreadHandler, DeadlockHandler, ErrorKind, ExitHandler, PanicHandler,
     ReleaseThreadHandler, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
 };
+use corosensei::{fiber, Fiber};
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::Hasher;
 use std::io;
 use std::mem;
 use std::ptr;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{mpsc, Arc, Mutex, Once};
 use std::thread;
 use std::usize;
 
@@ -706,6 +708,9 @@ impl ThreadInfo {
 /// WorkerThread identifiers
 
 pub(super) struct WorkerThread {
+    /// fibers for stack switching
+    pub(crate) fibers: ThreadFibers,
+
     /// the "worker" half of our local deque
     worker: Worker<JobRef>,
 
@@ -722,6 +727,59 @@ pub(super) struct WorkerThread {
 
     pub(crate) registry: Arc<Registry>,
 }
+
+struct ThreadFibers {
+    free: RefCell<Vec<Fiber<Ready>>>,
+    scheduled: mpsc::Receiver<mpsc::Receiver<Fiber<Pending>>>,
+    scheduler: mpsc::Sender<mpsc::Receiver<Fiber<Pending>>>,
+}
+
+struct Ready;
+struct Pending;
+
+impl ThreadFibers {
+    fn new() -> Self {
+        let (scheduler, scheduled) = mpsc::channel();
+        ThreadFibers {
+            free: RefCell::new(Vec::new()),
+            scheduled,
+            scheduler,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn create_waker(&self) -> (mpsc::SyncSender<Fiber<()>>, FiberWaker) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        (
+            sender,
+            FiberWaker {
+                scheduler: self.scheduler.clone(),
+                receiver,
+            },
+        )
+    }
+}
+
+pub(crate) struct FiberWaker {
+    receiver: mpsc::Receiver<Fiber<()>>,
+    scheduler: mpsc::Sender<mpsc::Receiver<Fiber<()>>>,
+}
+
+impl fmt::Debug for FiberWaker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // TODO: print stack pointer if present
+        f.debug_struct("FiberWaker").finish_non_exhaustive()
+    }
+}
+
+impl FiberWaker {
+    pub(crate) fn wake(self) {
+        self.scheduler.send(self.receiver).unwrap();
+    }
+}
+
+unsafe impl Send for FiberWaker {}
+unsafe impl Sync for FiberWaker {}
 
 // This is a bit sketchy, but basically: the WorkerThread is
 // allocated on the stack of the worker on entry and stored into this
@@ -741,6 +799,7 @@ impl From<ThreadBuilder> for WorkerThread {
             index: thread.index,
             rng: XorShift64Star::new(),
             registry: thread.registry,
+            fibers: ThreadFibers::new(),
         }
     }
 }
@@ -839,15 +898,19 @@ impl WorkerThread {
     /// Wait until the latch is set. Try to keep busy by popping and
     /// stealing tasks as necessary.
     #[inline]
-    pub(super) unsafe fn wait_until<L: AsCoreLatch + ?Sized>(&self, latch: &L) {
+    pub(super) unsafe fn wait_until<L: AsCoreLatch + ?Sized>(
+        &self,
+        latch: &L,
+        execute_inline: bool,
+    ) {
         let latch = latch.as_core_latch();
         if !latch.probe() {
-            self.wait_until_cold(latch);
+            self.wait_until_cold(latch, execute_inline);
         }
     }
 
     #[cold]
-    unsafe fn wait_until_cold(&self, latch: &CoreLatch) {
+    unsafe fn wait_until_cold(&self, latch: &CoreLatch, execute_inline: bool) {
         // the code below should swallow all panics and hence never
         // unwind; but if something does wrong, we want to abort,
         // because otherwise other code in rayon may assume that the
@@ -859,7 +922,7 @@ impl WorkerThread {
         while !latch.probe() {
             if let Some(job) = self.find_work() {
                 self.registry.sleep.work_found(idle_state);
-                self.execute(job);
+                self.execute(job, execute_inline);
                 idle_state = self.registry.sleep.start_looking(self.index, latch);
             } else {
                 self.registry
@@ -894,7 +957,7 @@ impl WorkerThread {
     pub(super) fn yield_now(&self) -> Yield {
         match self.find_work() {
             Some(job) => unsafe {
-                self.execute(job);
+                self.execute(job, false);
                 Yield::Executed
             },
             None => Yield::Idle,
@@ -904,7 +967,7 @@ impl WorkerThread {
     pub(super) fn yield_local(&self) -> Yield {
         match self.take_local_job() {
             Some(job) => unsafe {
-                self.execute(job);
+                self.execute(job, false);
                 Yield::Executed
             },
             None => Yield::Idle,
@@ -912,8 +975,35 @@ impl WorkerThread {
     }
 
     #[inline]
-    pub(super) unsafe fn execute(&self, job: JobRef) {
-        job.execute();
+    pub(super) unsafe fn execute(&self, job: JobRef, is_root: bool) {
+        if is_root {
+            job.execute();
+        } else {
+            self.get_free_fiber().switch(|fiber| {
+                self.fibers.free.borrow_mut().push(fiber);
+                job
+            })
+        }
+    }
+
+    fn get_free_fiber(&self) -> Fiber<JobRef> {
+        let free_fiber = self.fibers.free.borrow_mut().pop();
+        free_fiber.unwrap_or_else(fiber().switch({
+            let wt = ptr::addr_of!(*self);
+            move |parent| {
+                // Worker thread should not panic. If it does, fiber will just abort by default.
+
+                let worker_thread = unsafe { &*wt };
+                let registry = &*worker_thread.registry;
+                let index = worker_thread.index;
+
+                let my_terminate_latch = &registry.thread_infos[index].terminate;
+                worker_thread.wait_until(my_terminate_latch);
+
+                // Should not be any work left in our queue.
+                debug_assert!(worker_thread.take_local_job().is_none());
+            }
+        }))
     }
 
     /// Try to steal a single job and return it.
