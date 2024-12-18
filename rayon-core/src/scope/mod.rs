@@ -696,8 +696,9 @@ impl<'scope> ScopeBase<'scope> {
         let result = unsafe { Self::execute_job_closure(self, func) };
         self.job_completed_latch.wait(owner);
 
-        // Restore the TLV if we ran some jobs while waiting
-        tlv::set(self.tlv);
+        // FIXME: delete after elaboration
+        // // Restore the TLV if we ran some jobs while waiting
+        // tlv::set(self.tlv);
 
         self.maybe_propagate_panic();
         result.unwrap() // only None if `op` panicked, and that would have been propagated
@@ -759,8 +760,9 @@ impl<'scope> ScopeBase<'scope> {
         if !panic.is_null() {
             let value = unsafe { Box::from_raw(panic) };
 
-            // Restore the TLV if we ran some jobs while waiting
-            tlv::set(self.tlv);
+            // FIXME: delete after elaboration
+            // // Restore the TLV if we ran some jobs while waiting
+            // tlv::set(self.tlv);
 
             unwind::resume_unwinding(*value);
         }

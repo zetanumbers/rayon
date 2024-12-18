@@ -3,7 +3,7 @@ use crate::latch::{AsCoreLatch, CoreLatch, CountLatch, FiberLatch, Latch, LatchR
 use crate::log::Event::*;
 use crate::log::Logger;
 use crate::sleep::Sleep;
-use crate::tlv::Tlv;
+use crate::tlv::{self, Tlv};
 use crate::unwind;
 use crate::{
     AcquireThreadHandler, DeadlockHandler, ErrorKind, ExitHandler, PanicHandler,
@@ -922,10 +922,12 @@ impl WorkerThread {
                 Ok(rx) => match rx.try_recv() {
                     Ok(fiber) => {
                         let wt = ptr::addr_of!(*self);
+                        let tlv = tlv::get();
                         let Ready = fiber.switch(move |prev| {
                             (*wt).fibers.free.borrow_mut().push(prev);
                             Pending
                         });
+                        tlv::set(tlv);
                         continue;
                     }
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {

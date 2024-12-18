@@ -9,6 +9,7 @@ use std::{ptr, usize};
 use corosensei::fiber;
 
 use crate::registry::{FiberWaker, Pending, Ready, Registry, WorkerThread};
+use crate::tlv::{self, TLV};
 
 /// We define various kinds of latches, which are all a primitive signaling
 /// mechanism. A latch starts as false. Eventually someone calls `set()` and
@@ -224,8 +225,9 @@ impl FiberLatch {
             }
         };
         let free_fiber = worker_thread.fibers.free.borrow_mut().pop();
+        let tlv = tlv::get();
         if let Some(free_fiber) = free_fiber {
-            free_fiber.switch(schedule_fiber);
+            let Pending = free_fiber.switch(schedule_fiber);
         } else {
             let wt = ptr::addr_of!(*worker_thread);
             let Pending = fiber().switch(move |prev| {
@@ -247,6 +249,7 @@ impl FiberLatch {
                 (worker_thread.fibers.free.borrow_mut().pop().unwrap(), Ready)
             });
         }
+        tlv::set(tlv);
     }
 }
 

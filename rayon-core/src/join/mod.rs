@@ -132,7 +132,8 @@ where
     }
 
     registry::in_worker(|worker_thread, injected| unsafe {
-        let tlv = tlv::get();
+        // FIXME: delete after elaboration
+        // let tlv = tlv::get();
         // Create virtual wrapper for task b; this all has to be
         // done here so that the stack frame can keep it all live
         // long enough.
@@ -183,8 +184,9 @@ where
             // }
         }
 
-        // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
-        tlv::set(tlv);
+        // FIXME: delete after elaboration
+        // // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
+        // tlv::set(tlv);
 
         (result_a, job_b.into_result())
     })
@@ -202,8 +204,9 @@ unsafe fn join_recover_from_panic(
 ) -> ! {
     job_b_latch.await_(&worker_thread);
 
-    // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
-    tlv::set(tlv);
+    // FIXME: delete after elaboration
+    // // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
+    // tlv::set(tlv);
 
     unwind::resume_unwinding(err)
 }
