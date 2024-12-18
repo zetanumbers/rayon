@@ -1,9 +1,10 @@
 use crate::job::StackJob;
-use crate::latch::{AsCoreLatch, SpinLatch};
+use crate::latch::FiberLatch;
 use crate::registry::{self, WorkerThread};
 use crate::tlv::{self, Tlv};
 use crate::unwind;
 use std::any::Any;
+use std::sync::Arc;
 
 use crate::FnContext;
 
@@ -135,9 +136,12 @@ where
         // Create virtual wrapper for task b; this all has to be
         // done here so that the stack frame can keep it all live
         // long enough.
-        let job_b = StackJob::new(tlv, call_b(oper_b), SpinLatch::new(worker_thread));
+        let job_b = StackJob::new(
+            tlv,
+            call_b(oper_b),
+            FiberLatch::new(Arc::clone(&worker_thread.registry())),
+        );
         let job_b_ref = job_b.as_job_ref();
-        let job_b_id = job_b_ref.id();
         worker_thread.push(job_b_ref);
 
         // Execute task a; hopefully b gets stolen in the meantime.
@@ -152,28 +156,31 @@ where
         // may also have been stolen. There may also be some tasks
         // pushed on top of it in the stack, and we will have to pop
         // those off to get to it.
-        while !job_b.latch.probe() {
-            if let Some(job) = worker_thread.take_local_job() {
-                if job_b_id == job.id() {
-                    // Found it! Let's run it.
-                    //
-                    // Note that this could panic, but it's ok if we unwind here.
+        if !job_b.latch.probe() {
+            job_b.latch.await_(worker_thread);
+            debug_assert!(job_b.latch.probe());
+            // TODO: try stealing job from queue via a custom new job type
+            // if let Some(job) = worker_thread.take_local_job() {
+            //     if job_b_id == job.id() {
+            //         // Found it! Let's run it.
+            //         //
+            //         // Note that this could panic, but it's ok if we unwind here.
 
-                    // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
-                    tlv::set(tlv);
+            //         // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
+            //         tlv::set(tlv);
 
-                    let result_b = job_b.run_inline(injected);
-                    return (result_a, result_b);
-                } else {
-                    worker_thread.execute(job, job_b.latch.as_core_latch());
-                }
-            } else {
-                // Local deque is empty. Time to steal from other
-                // threads.
-                worker_thread.wait_until(&job_b.latch);
-                debug_assert!(job_b.latch.probe());
-                break;
-            }
+            //         let result_b = job_b.run_inline(injected);
+            //         return (result_a, result_b);
+            //     } else {
+            //         worker_thread.execute(job, job_b.latch.as_core_latch());
+            //     }
+            // } else {
+            //     // Local deque is empty. Time to steal from other
+            //     // threads.
+            //     worker_thread.wait_until(&job_b.latch);
+            //     debug_assert!(job_b.latch.probe());
+            //     break;
+            // }
         }
 
         // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
@@ -189,11 +196,11 @@ where
 #[cold] // cold path
 unsafe fn join_recover_from_panic(
     worker_thread: &WorkerThread,
-    job_b_latch: &SpinLatch<'_>,
+    job_b_latch: &FiberLatch,
     err: Box<dyn Any + Send>,
     tlv: Tlv,
 ) -> ! {
-    worker_thread.wait_until(job_b_latch);
+    job_b_latch.await_(&worker_thread);
 
     // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
     tlv::set(tlv);

@@ -114,6 +114,7 @@ mod par_indexmap;
 
 mod compile_fail;
 
+pub use rayon_core::future;
 pub use rayon_core::FnContext;
 pub use rayon_core::ThreadBuilder;
 pub use rayon_core::ThreadPool;

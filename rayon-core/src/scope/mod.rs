@@ -7,7 +7,7 @@
 
 use crate::broadcast::BroadcastContext;
 use crate::job::{ArcJob, HeapJob, JobFifo, JobRef};
-use crate::latch::{CountLatch, CountLockLatch, Latch};
+use crate::latch::{AsFiberLatch, CountFiberLatch, CountLockLatch, Latch};
 use crate::registry::{global_registry, in_worker, Registry, WorkerThread};
 use crate::tlv::{self, Tlv};
 use crate::unwind;
@@ -44,8 +44,8 @@ pub(super) enum ScopeLatch {
     /// A latch for scopes created on a rayon thread which will participate in work-
     /// stealing while it waits for completion. This thread is not necessarily part
     /// of the same registry as the scope itself!
-    Stealing {
-        latch: CountLatch,
+    Switching {
+        latch: CountFiberLatch,
         /// If a worker thread in registry A calls `in_place_scope` on a ThreadPool
         /// with registry B, when a job completes in a thread of registry B, we may
         /// need to call `latch.set_and_tickle_one()` to wake the thread in registry A.
@@ -774,8 +774,8 @@ impl ScopeLatch {
 
     pub(super) fn with_count(count: usize, owner: Option<&WorkerThread>) -> Self {
         match owner {
-            Some(owner) => ScopeLatch::Stealing {
-                latch: CountLatch::with_count(count),
+            Some(owner) => ScopeLatch::Switching {
+                latch: CountFiberLatch::with_count(count, Arc::clone(owner.registry())),
                 registry: Arc::clone(owner.registry()),
                 worker_index: owner.index(),
             },
@@ -787,23 +787,23 @@ impl ScopeLatch {
 
     fn increment(&self) {
         match self {
-            ScopeLatch::Stealing { latch, .. } => latch.increment(),
+            ScopeLatch::Switching { latch, .. } => latch.increment(),
             ScopeLatch::Blocking { latch } => latch.increment(),
         }
     }
 
     pub(super) fn wait(&self, owner: Option<&WorkerThread>) {
         match self {
-            ScopeLatch::Stealing {
+            ScopeLatch::Switching {
                 latch,
                 registry,
                 worker_index,
-            } => unsafe {
+            } => {
                 let owner = owner.expect("owner thread");
                 debug_assert_eq!(registry.id(), owner.registry().id());
                 debug_assert_eq!(*worker_index, owner.index());
-                owner.wait_until(latch);
-            },
+                latch.as_fiber_latch().await_(owner);
+            }
             ScopeLatch::Blocking { latch } => latch.wait(),
         }
     }
@@ -812,11 +812,11 @@ impl ScopeLatch {
 impl Latch for ScopeLatch {
     unsafe fn set(this: *const Self) {
         match &*this {
-            ScopeLatch::Stealing {
+            ScopeLatch::Switching {
                 latch,
                 registry,
                 worker_index,
-            } => CountLatch::set_and_tickle_one(latch, registry, *worker_index),
+            } => CountFiberLatch::set_and_tickle_one(latch, registry, *worker_index),
             ScopeLatch::Blocking { latch } => Latch::set(latch),
         }
     }
@@ -846,7 +846,7 @@ impl<'scope> fmt::Debug for ScopeFifo<'scope> {
 impl fmt::Debug for ScopeLatch {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ScopeLatch::Stealing { latch, .. } => fmt
+            ScopeLatch::Switching { latch, .. } => fmt
                 .debug_tuple("ScopeLatch::Stealing")
                 .field(latch)
                 .finish(),

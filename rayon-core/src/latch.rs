@@ -1,13 +1,14 @@
-use std::cell::UnsafeCell;
+use std::collections::HashSet;
 use std::marker::PhantomData;
-use std::mem::{self, take, MaybeUninit};
+use std::mem::take;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::{ptr, usize};
 
-use crate::job::JobRef;
-use crate::registry::{FiberWaker, Registry, WorkerThread};
+use corosensei::fiber;
+
+use crate::registry::{FiberWaker, Pending, Ready, Registry, WorkerThread};
 
 /// We define various kinds of latches, which are all a primitive signaling
 /// mechanism. A latch starts as false. Eventually someone calls `set()` and
@@ -59,6 +60,12 @@ pub(super) trait AsCoreLatch {
 
 pub(super) trait AsFiberLatch {
     fn as_fiber_latch(&self) -> &FiberLatch;
+}
+
+impl<L: AsFiberLatch> AsCoreLatch for L {
+    fn as_core_latch(&self) -> &CoreLatch {
+        &self.as_fiber_latch().core_latch
+    }
 }
 
 /// Latch is not set, owning thread is awake
@@ -151,15 +158,36 @@ impl CoreLatch {
 
 pub(super) struct FiberLatch {
     core_latch: CoreLatch,
-    wakers: Mutex<Vec<FiberWaker>>,
+    state: Mutex<FiberLatchState>,
+    registry: Arc<Registry>,
+}
+
+impl std::fmt::Debug for FiberLatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FiberLatch")
+            .field("core_latch", &self.core_latch)
+            .field("state", &self.state)
+            .field("registry", &"Registry")
+            .finish()
+    }
+}
+
+#[derive(Default, Debug)]
+struct FiberLatchState {
+    wakers: Vec<FiberWaker>,
+    waiting_workers: HashSet<usize>,
 }
 
 impl FiberLatch {
     #[inline]
-    pub(super) fn new() -> Self {
+    pub(super) fn new(registry: Arc<Registry>) -> Self {
         FiberLatch {
             core_latch: CoreLatch::new(),
-            wakers: Mutex::new(Vec::new()),
+            state: Mutex::new(FiberLatchState {
+                wakers: Vec::new(),
+                waiting_workers: HashSet::new(),
+            }),
+            registry,
         }
     }
 
@@ -177,18 +205,61 @@ impl FiberLatch {
         }
 
         let (tx, waker) = worker_thread.fibers.create_waker();
+        let mut state = self.state.lock().unwrap();
+        state.wakers.push(waker);
+        state.waiting_workers.insert(worker_thread.index);
+        drop(state);
 
-        if self.probe() {}
+        if self.probe() {
+            return;
+        }
+
+        let schedule_fiber = move |prev| match tx.try_send(prev) {
+            Ok(()) => Ready,
+            Err(mpsc::TrySendError::Full(_)) => {
+                unreachable!("oneshot fiber channel is full")
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                panic!("fiber waker was dropped")
+            }
+        };
+        let free_fiber = worker_thread.fibers.free.borrow_mut().pop();
+        if let Some(free_fiber) = free_fiber {
+            free_fiber.switch(schedule_fiber);
+        } else {
+            let wt = ptr::addr_of!(*worker_thread);
+            let Pending = fiber().switch(move |prev| {
+                // Worker thread should not panic. If it does, fiber will just abort by default.
+
+                let Ready = schedule_fiber(prev);
+
+                let worker_thread = unsafe { &*wt };
+                let registry = &*worker_thread.registry;
+                let index = worker_thread.index;
+
+                let my_terminate_latch = &registry.thread_infos[index].terminate;
+                unsafe { worker_thread.work_until(my_terminate_latch) };
+
+                // Should not be any work left in our queue.
+                debug_assert!(worker_thread.take_local_job().is_none());
+                // Finish up other fibers
+                // FIXME: what to do in case there's no free fibers?
+                (worker_thread.fibers.free.borrow_mut().pop().unwrap(), Ready)
+            });
+        }
     }
 }
 
 impl Latch for FiberLatch {
     #[inline]
-    pub(super) unsafe fn set(this: *const Self) {
+    unsafe fn set(this: *const Self) {
         CoreLatch::set(ptr::addr_of!((*this).core_latch));
-        let wakers = take(&mut *(*this).wakers.lock().unwrap());
-        for waker in wakers {
+        let old_state = take(&mut *(*this).state.lock().unwrap());
+        for waker in old_state.wakers {
             waker.wake();
+        }
+        for waiting_worker in old_state.waiting_workers {
+            (*this).registry.notify_worker_latch_is_set(waiting_worker);
         }
     }
 }
@@ -390,9 +461,78 @@ impl CountLatch {
 }
 
 impl AsCoreLatch for CountLatch {
-    #[inline]
     fn as_core_latch(&self) -> &CoreLatch {
         &self.core_latch
+    }
+}
+
+/// Counting latches are used to implement scopes. They track a
+/// counter. Unlike other latches, calling `set()` does not
+/// necessarily make the latch be considered `set()`; instead, it just
+/// decrements the counter. The latch is only "set" (in the sense that
+/// `probe()` returns true) once the counter reaches zero.
+///
+/// Note: like a `SpinLatch`, count laches are always associated with
+/// some registry that is probing them, which must be tickled when
+/// they are set. *Unlike* a `SpinLatch`, they don't themselves hold a
+/// reference to that registry. This is because in some cases the
+/// registry owns the count-latch, and that would create a cycle. So a
+/// `CountLatch` must be given a reference to its owning registry when
+/// it is set. For this reason, it does not implement the `Latch`
+/// trait (but it doesn't have to, as it is not used in those generic
+/// contexts).
+#[derive(Debug)]
+pub(super) struct CountFiberLatch {
+    fiber_latch: FiberLatch,
+    counter: AtomicUsize,
+}
+
+impl CountFiberLatch {
+    #[inline]
+    pub(super) fn with_count(n: usize, registry: Arc<Registry>) -> CountFiberLatch {
+        CountFiberLatch {
+            fiber_latch: FiberLatch::new(registry),
+            counter: AtomicUsize::new(n),
+        }
+    }
+
+    #[inline]
+    pub(super) fn increment(&self) {
+        debug_assert!(!self.fiber_latch.probe());
+        self.counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrements the latch counter by one. If this is the final
+    /// count, then the latch is **set**, and calls to `probe()` will
+    /// return true. Returns whether the latch was set.
+    #[inline]
+    pub(super) unsafe fn set(this: *const Self) -> bool {
+        if (*this).counter.fetch_sub(1, Ordering::SeqCst) == 1 {
+            FiberLatch::set(&(*this).fiber_latch);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Decrements the latch counter by one and possibly set it.  If
+    /// the latch is set, then the specific worker thread is tickled,
+    /// which should be the one that owns this latch.
+    #[inline]
+    pub(super) unsafe fn set_and_tickle_one(
+        this: *const Self,
+        registry: &Registry,
+        target_worker_index: usize,
+    ) {
+        if Self::set(this) {
+            registry.notify_worker_latch_is_set(target_worker_index);
+        }
+    }
+}
+
+impl AsFiberLatch for CountFiberLatch {
+    fn as_fiber_latch(&self) -> &FiberLatch {
+        &self.fiber_latch
     }
 }
 

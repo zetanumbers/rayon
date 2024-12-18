@@ -91,6 +91,7 @@ mod worker_local;
 mod compile_fail;
 mod test;
 
+pub mod future;
 pub mod tlv;
 
 pub use self::broadcast::{broadcast, spawn_broadcast, BroadcastContext};
