@@ -132,8 +132,7 @@ where
     }
 
     registry::in_worker(|worker_thread, injected| unsafe {
-        // FIXME: delete after elaboration
-        // let tlv = tlv::get();
+        let tlv = tlv::get();
         // Create virtual wrapper for task b; this all has to be
         // done here so that the stack frame can keep it all live
         // long enough.
