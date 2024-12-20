@@ -776,7 +776,8 @@ impl fmt::Debug for FiberWaker {
 
 impl FiberWaker {
     pub(crate) fn wake(self) {
-        self.scheduler.send(self.receiver).unwrap();
+        // ignore error in case receiver is dropped
+        let _ = self.scheduler.send(self.receiver);
     }
 }
 
