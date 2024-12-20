@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::marker::PhantomData;
-use std::mem::take;
+use std::mem::replace;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -9,7 +9,7 @@ use std::{ptr, usize};
 use corosensei::fiber;
 
 use crate::registry::{FiberWaker, Pending, Ready, Registry, WorkerThread};
-use crate::tlv::{self, TLV};
+use crate::tlv;
 
 /// We define various kinds of latches, which are all a primitive signaling
 /// mechanism. A latch starts as false. Eventually someone calls `set()` and
@@ -61,12 +61,6 @@ pub(super) trait AsCoreLatch {
 
 pub(super) trait AsFiberLatch {
     fn as_fiber_latch(&self) -> &FiberLatch;
-}
-
-impl<L: AsFiberLatch> AsCoreLatch for L {
-    fn as_core_latch(&self) -> &CoreLatch {
-        &self.as_fiber_latch().core_latch
-    }
 }
 
 /// Latch is not set, owning thread is awake
@@ -158,7 +152,6 @@ impl CoreLatch {
 }
 
 pub(super) struct FiberLatch {
-    core_latch: CoreLatch,
     state: Mutex<FiberLatchState>,
     registry: Arc<Registry>,
 }
@@ -166,25 +159,26 @@ pub(super) struct FiberLatch {
 impl std::fmt::Debug for FiberLatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FiberLatch")
-            .field("core_latch", &self.core_latch)
             .field("state", &self.state)
             .field("registry", &"Registry")
             .finish()
     }
 }
 
-#[derive(Default, Debug)]
-struct FiberLatchState {
-    wakers: Vec<FiberWaker>,
-    waiting_workers: HashSet<usize>,
+#[derive(Debug)]
+enum FiberLatchState {
+    Waiting {
+        wakers: Vec<FiberWaker>,
+        waiting_workers: HashSet<usize>,
+    },
+    Set,
 }
 
 impl FiberLatch {
     #[inline]
     pub(super) fn new(registry: Arc<Registry>) -> Self {
         FiberLatch {
-            core_latch: CoreLatch::new(),
-            state: Mutex::new(FiberLatchState {
+            state: Mutex::new(FiberLatchState::Waiting {
                 wakers: Vec::new(),
                 waiting_workers: HashSet::new(),
             }),
@@ -195,26 +189,25 @@ impl FiberLatch {
     /// Test if this latch has been set.
     #[inline]
     pub(super) fn probe(&self) -> bool {
-        self.core_latch.probe()
+        matches!(*self.state.lock().unwrap(), FiberLatchState::Set)
     }
 
     #[inline]
     /// Await on the current fiber until latch is set.
     pub(super) fn await_(&self, worker_thread: &WorkerThread) {
-        if self.probe() {
-            return;
-        }
-
         let (tx, waker) = worker_thread.fibers.create_waker();
         let mut state = self.state.lock().unwrap();
-        state.wakers.push(waker);
-        state.waiting_workers.insert(worker_thread.index);
-        drop(state);
-
-        if self.probe() {
-            tx.send(None).unwrap();
-            return;
+        match &mut *state {
+            FiberLatchState::Waiting {
+                wakers,
+                waiting_workers,
+            } => {
+                wakers.push(waker);
+                waiting_workers.insert(worker_thread.index);
+            }
+            FiberLatchState::Set => return,
         }
+        drop(state);
 
         let schedule_fiber = move |prev| match tx.try_send(Some(prev)) {
             Ok(()) => Ready,
@@ -257,13 +250,20 @@ impl FiberLatch {
 impl Latch for FiberLatch {
     #[inline]
     unsafe fn set(this: *const Self) {
-        CoreLatch::set(ptr::addr_of!((*this).core_latch));
-        let old_state = take(&mut *(*this).state.lock().unwrap());
-        for waker in old_state.wakers {
-            waker.wake();
-        }
-        for waiting_worker in old_state.waiting_workers {
-            (*this).registry.notify_worker_latch_is_set(waiting_worker);
+        let old_state = replace(&mut *(*this).state.lock().unwrap(), FiberLatchState::Set);
+        match old_state {
+            FiberLatchState::Waiting {
+                wakers,
+                waiting_workers,
+            } => {
+                for waker in wakers {
+                    waker.wake();
+                }
+                for waiting_worker in waiting_workers {
+                    (*this).registry.notify_worker_latch_is_set(waiting_worker);
+                }
+            }
+            FiberLatchState::Set => (),
         }
     }
 }
