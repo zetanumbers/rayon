@@ -212,10 +212,11 @@ impl FiberLatch {
         drop(state);
 
         if self.probe() {
+            tx.send(None).unwrap();
             return;
         }
 
-        let schedule_fiber = move |prev| match tx.try_send(prev) {
+        let schedule_fiber = move |prev| match tx.try_send(Some(prev)) {
             Ok(()) => Ready,
             Err(mpsc::TrySendError::Full(_)) => {
                 unreachable!("oneshot fiber channel is full")

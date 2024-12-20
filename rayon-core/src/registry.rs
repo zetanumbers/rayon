@@ -732,8 +732,8 @@ pub(super) struct WorkerThread {
 pub(crate) struct ThreadFibers {
     pub(crate) free: RefCell<Vec<Fiber<Ready>>>,
     // TODO: Check if we need nested mpsc channels
-    pub(crate) scheduled: mpsc::Receiver<mpsc::Receiver<Fiber<Pending>>>,
-    pub(crate) scheduler: mpsc::Sender<mpsc::Receiver<Fiber<Pending>>>,
+    pub(crate) scheduled: mpsc::Receiver<mpsc::Receiver<Option<Fiber<Pending>>>>,
+    pub(crate) scheduler: mpsc::Sender<mpsc::Receiver<Option<Fiber<Pending>>>>,
 }
 
 pub(crate) struct Ready;
@@ -750,7 +750,7 @@ impl ThreadFibers {
     }
 
     #[inline]
-    pub(crate) fn create_waker(&self) -> (mpsc::SyncSender<Fiber<Pending>>, FiberWaker) {
+    pub(crate) fn create_waker(&self) -> (mpsc::SyncSender<Option<Fiber<Pending>>>, FiberWaker) {
         let (sender, receiver) = mpsc::sync_channel(1);
         (
             sender,
@@ -763,8 +763,8 @@ impl ThreadFibers {
 }
 
 pub(crate) struct FiberWaker {
-    receiver: mpsc::Receiver<Fiber<Pending>>,
-    scheduler: mpsc::Sender<mpsc::Receiver<Fiber<Pending>>>,
+    receiver: mpsc::Receiver<Option<Fiber<Pending>>>,
+    scheduler: mpsc::Sender<mpsc::Receiver<Option<Fiber<Pending>>>>,
 }
 
 impl fmt::Debug for FiberWaker {
@@ -920,7 +920,7 @@ impl WorkerThread {
         while !latch.probe() {
             match self.fibers.scheduled.try_recv() {
                 Ok(rx) => match rx.try_recv() {
-                    Ok(fiber) => {
+                    Ok(Some(fiber)) => {
                         let wt = ptr::addr_of!(*self);
                         let tlv = tlv::get();
                         let Ready = fiber.switch(move |prev| {
@@ -930,6 +930,7 @@ impl WorkerThread {
                         tlv::set(tlv);
                         continue;
                     }
+                    Ok(None) => continue,
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
                         unreachable!("expected fiber wasn't scheduled")
                     }
