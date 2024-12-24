@@ -777,7 +777,7 @@ impl ScopeLatch {
     pub(super) fn with_count(count: usize, owner: Option<&WorkerThread>) -> Self {
         match owner {
             Some(owner) => ScopeLatch::Switching {
-                latch: CountFiberLatch::with_count(count, Arc::clone(owner.registry())),
+                latch: CountFiberLatch::with_count(count),
                 registry: Arc::clone(owner.registry()),
                 worker_index: owner.index(),
             },

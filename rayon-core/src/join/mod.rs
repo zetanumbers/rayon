@@ -4,7 +4,6 @@ use crate::registry::{self, WorkerThread};
 use crate::tlv::{self, Tlv};
 use crate::unwind;
 use std::any::Any;
-use std::sync::Arc;
 
 use crate::FnContext;
 
@@ -136,11 +135,7 @@ where
         // Create virtual wrapper for task b; this all has to be
         // done here so that the stack frame can keep it all live
         // long enough.
-        let job_b = StackJob::new(
-            tlv,
-            call_b(oper_b),
-            FiberLatch::new(Arc::clone(&worker_thread.registry())),
-        );
+        let job_b = StackJob::new(tlv, call_b(oper_b), FiberLatch::new());
         let job_b_ref = job_b.as_job_ref();
         worker_thread.push(job_b_ref);
 

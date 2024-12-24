@@ -92,10 +92,12 @@ mod compile_fail;
 mod test;
 
 pub mod future;
+pub mod lock_api;
 pub mod tlv;
 
 pub use self::broadcast::{broadcast, spawn_broadcast, BroadcastContext};
 pub use self::join::{join, join_context};
+pub use self::lock_api::Mutex;
 pub use self::registry::ThreadBuilder;
 pub use self::registry::{mark_blocked, mark_unblocked, Registry};
 pub use self::scope::{in_place_scope, scope, Scope};

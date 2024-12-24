@@ -116,6 +116,7 @@ mod compile_fail;
 
 pub use rayon_core::future;
 pub use rayon_core::FnContext;
+pub use rayon_core::Mutex;
 pub use rayon_core::ThreadBuilder;
 pub use rayon_core::ThreadPool;
 pub use rayon_core::ThreadPoolBuildError;

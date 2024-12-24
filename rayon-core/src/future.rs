@@ -26,7 +26,7 @@ impl<F: IntoFuture> IntoFutureExt for F {
         let mut fut = pin!(self.into_future());
         loop {
             let rayon_waker = Arc::new(RayonWaker {
-                latch: FiberLatch::new(unsafe { Arc::clone((*wt).registry()) }),
+                latch: FiberLatch::new(),
             });
             let waker = Waker::from(Arc::clone(&rayon_waker));
             let mut cx = Context::from_waker(&waker);

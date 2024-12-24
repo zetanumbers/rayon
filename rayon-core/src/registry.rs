@@ -587,7 +587,7 @@ impl Registry {
         debug_assert!(current_thread.registry().id() != self.id());
         // FIXME: cross executor behavior
         // let latch = SpinLatch::cross(current_thread);
-        let latch = FiberLatch::new(Arc::clone(current_thread.registry()));
+        let latch = FiberLatch::new();
         let job = StackJob::new(
             Tlv::null(),
             |injected| {

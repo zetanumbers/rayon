@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::mem::replace;
 use std::ops::Deref;
@@ -153,7 +152,6 @@ impl CoreLatch {
 
 pub(super) struct FiberLatch {
     state: Mutex<FiberLatchState>,
-    registry: Arc<Registry>,
 }
 
 impl std::fmt::Debug for FiberLatch {
@@ -167,22 +165,53 @@ impl std::fmt::Debug for FiberLatch {
 
 #[derive(Debug)]
 enum FiberLatchState {
-    Waiting {
-        wakers: Vec<FiberWaker>,
-        waiting_workers: HashSet<usize>,
-    },
+    Waiting { waiters: Vec<FiberWaiter> },
     Set,
+}
+
+struct FiberWaiter {
+    waker: FiberWaker,
+    registry: Arc<Registry>,
+    thread_index: usize,
+}
+
+impl std::fmt::Debug for FiberWaiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FiberWaiter")
+            .field("waker", &self.waker)
+            .field("registry", &format_args!("Registry({:p})", self.registry))
+            .field("thread_index", &self.thread_index)
+            .finish()
+    }
 }
 
 impl FiberLatch {
     #[inline]
-    pub(super) fn new(registry: Arc<Registry>) -> Self {
+    pub(super) fn new() -> Self {
         FiberLatch {
             state: Mutex::new(FiberLatchState::Waiting {
-                wakers: Vec::new(),
-                waiting_workers: HashSet::new(),
+                waiters: Vec::new(),
             }),
-            registry,
+        }
+    }
+
+    #[inline]
+    pub(super) const fn already_set() -> Self {
+        FiberLatch {
+            state: Mutex::new(FiberLatchState::Set),
+        }
+    }
+
+    #[inline]
+    pub(super) fn probe_and_reset(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if let FiberLatchState::Set = *state {
+            *state = FiberLatchState::Waiting {
+                waiters: Vec::new(),
+            };
+            true
+        } else {
+            false
         }
     }
 
@@ -198,13 +227,11 @@ impl FiberLatch {
         let (tx, waker) = worker_thread.fibers.create_waker();
         let mut state = self.state.lock().unwrap();
         match &mut *state {
-            FiberLatchState::Waiting {
-                wakers,
-                waiting_workers,
-            } => {
-                wakers.push(waker);
-                waiting_workers.insert(worker_thread.index);
-            }
+            FiberLatchState::Waiting { waiters } => waiters.push(FiberWaiter {
+                waker,
+                registry: Arc::clone(worker_thread.registry()),
+                thread_index: worker_thread.index(),
+            }),
             FiberLatchState::Set => return,
         }
         drop(state);
@@ -252,15 +279,12 @@ impl Latch for FiberLatch {
     unsafe fn set(this: *const Self) {
         let old_state = replace(&mut *(*this).state.lock().unwrap(), FiberLatchState::Set);
         match old_state {
-            FiberLatchState::Waiting {
-                wakers,
-                waiting_workers,
-            } => {
-                for waker in wakers {
-                    waker.wake();
-                }
-                for waiting_worker in waiting_workers {
-                    (*this).registry.notify_worker_latch_is_set(waiting_worker);
+            FiberLatchState::Waiting { waiters } => {
+                for waiter in waiters {
+                    waiter.waker.wake();
+                    waiter
+                        .registry
+                        .notify_worker_latch_is_set(waiter.thread_index);
                 }
             }
             FiberLatchState::Set => (),
@@ -493,9 +517,9 @@ pub(super) struct CountFiberLatch {
 
 impl CountFiberLatch {
     #[inline]
-    pub(super) fn with_count(n: usize, registry: Arc<Registry>) -> CountFiberLatch {
+    pub(super) fn with_count(n: usize) -> CountFiberLatch {
         CountFiberLatch {
-            fiber_latch: FiberLatch::new(registry),
+            fiber_latch: FiberLatch::new(),
             counter: AtomicUsize::new(n),
         }
     }
