@@ -187,7 +187,7 @@ impl std::fmt::Debug for FiberWaiter {
 
 impl FiberLatch {
     #[inline]
-    pub(super) fn new() -> Self {
+    pub(super) const fn new() -> Self {
         FiberLatch {
             state: Mutex::new(FiberLatchState::Waiting {
                 waiters: Vec::new(),

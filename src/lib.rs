@@ -116,7 +116,6 @@ mod compile_fail;
 
 pub use rayon_core::future;
 pub use rayon_core::FnContext;
-pub use rayon_core::Mutex;
 pub use rayon_core::ThreadBuilder;
 pub use rayon_core::ThreadPool;
 pub use rayon_core::ThreadPoolBuildError;
@@ -128,6 +127,7 @@ pub use rayon_core::{in_place_scope_fifo, scope_fifo, ScopeFifo};
 pub use rayon_core::{join, join_context};
 pub use rayon_core::{spawn, spawn_fifo};
 pub use rayon_core::{yield_local, yield_now, Yield};
+pub use rayon_core::{Condvar, Mutex};
 
 /// We need to transmit raw pointers across threads. It is possible to do this
 /// without any unsafe code by converting pointers to usize or to AtomicPtr<T>
