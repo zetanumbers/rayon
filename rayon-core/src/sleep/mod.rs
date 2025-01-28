@@ -103,30 +103,6 @@ impl Sleep {
         }
     }
 
-    /// Mark a Rayon worker thread as blocked. This triggers the deadlock handler
-    /// if no other worker thread is active
-    #[inline]
-    pub fn mark_blocked(&self, deadlock_handler: &Option<Box<DeadlockHandler>>) {
-        let mut data = self.data.lock().unwrap();
-        debug_assert!(data.active_threads > 0);
-        debug_assert!(data.blocked_threads < data.worker_count);
-        debug_assert!(data.active_threads > 0);
-        data.active_threads -= 1;
-        data.blocked_threads += 1;
-
-        data.deadlock_check(deadlock_handler);
-    }
-
-    /// Mark a previously blocked Rayon worker thread as unblocked
-    #[inline]
-    pub fn mark_unblocked(&self) {
-        let mut data = self.data.lock().unwrap();
-        debug_assert!(data.active_threads < data.worker_count);
-        debug_assert!(data.blocked_threads > 0);
-        data.active_threads += 1;
-        data.blocked_threads -= 1;
-    }
-
     #[inline]
     pub(super) fn start_looking(&self, worker_index: usize, latch: &CoreLatch) -> IdleState {
         self.logger.log(|| ThreadIdle {

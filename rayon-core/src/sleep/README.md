@@ -220,6 +220,8 @@ Either PushFence or SleepFence must come first:
 
 # Deadlock detection
 
+TODO: update
+
 This module tracks a number of variables in order to detect deadlocks due to user code blocking.
 These variables are stored in the `SleepData` struct which itself is kept behind a mutex.
 It contains the following fields:

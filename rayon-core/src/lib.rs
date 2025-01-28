@@ -99,7 +99,7 @@ pub use self::broadcast::{broadcast, spawn_broadcast, BroadcastContext};
 pub use self::join::{join, join_context};
 pub use self::lock_api::{Condvar, Mutex};
 pub use self::registry::ThreadBuilder;
-pub use self::registry::{mark_blocked, mark_unblocked, Registry};
+pub use self::registry::Registry;
 pub use self::scope::{in_place_scope, scope, Scope};
 pub use self::scope::{in_place_scope_fifo, scope_fifo, ScopeFifo};
 pub use self::spawn::{spawn, spawn_fifo};

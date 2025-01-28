@@ -648,24 +648,6 @@ impl Registry {
     }
 }
 
-/// Mark a Rayon worker thread as blocked. This triggers the deadlock handler
-/// if no other worker thread is active
-#[inline]
-pub fn mark_blocked() {
-    let worker_thread = WorkerThread::current();
-    assert!(!worker_thread.is_null());
-    unsafe {
-        let registry = &(*worker_thread).registry;
-        registry.sleep.mark_blocked(&registry.deadlock_handler)
-    }
-}
-
-/// Mark a previously blocked Rayon worker thread as unblocked
-#[inline]
-pub fn mark_unblocked(registry: &Registry) {
-    registry.sleep.mark_unblocked()
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct RegistryId {
     addr: usize,
