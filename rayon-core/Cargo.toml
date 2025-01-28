@@ -24,6 +24,7 @@ crossbeam-deque = "0.8.1"
 crossbeam-utils = "0.8.0"
 rustc-corosensei = { git = "https://github.com/zetanumbers/corosensei.git", branch = "rustc-fibers", version = "0.2.1" }
 lock_api = "0.4.12"
+futures-lite = { version = "1.13.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 rand = "0.8"

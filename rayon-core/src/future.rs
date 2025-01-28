@@ -5,6 +5,8 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
+use futures_lite::future::block_on;
+
 use crate::{
     latch::{FiberLatch, Latch},
     registry::WorkerThread,
@@ -18,12 +20,12 @@ impl<F: IntoFuture> IntoFutureExt for F {
     fn await_(self) -> Self::Output {
         // Since we pin future onto a stack, you can only poll future from the current fiber
         // and thus current thread.
-        // FIXME: cross executor await
+        let mut fut = pin!(self.into_future());
+
         let wt = WorkerThread::current();
         if wt.is_null() {
-            todo!("awaiting outside of the worker")
+            return block_on(fut);
         }
-        let mut fut = pin!(self.into_future());
         loop {
             let rayon_waker = Arc::new(RayonWaker {
                 latch: FiberLatch::new(),
