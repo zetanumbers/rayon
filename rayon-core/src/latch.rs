@@ -185,6 +185,17 @@ impl std::fmt::Debug for FiberWaiter {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct FiberLatchAlreadySetError(());
+
+impl std::fmt::Display for FiberLatchAlreadySetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        "FiberLatch is already set".fmt(f)
+    }
+}
+
+impl std::error::Error for FiberLatchAlreadySetError {}
+
 impl FiberLatch {
     #[inline]
     pub(super) const fn new() -> Self {
@@ -222,8 +233,16 @@ impl FiberLatch {
     }
 
     #[inline]
-    /// Await on the current fiber until latch is set.
     pub(super) fn await_(&self, worker_thread: &WorkerThread) {
+        let _ = self.try_await_(worker_thread);
+    }
+
+    #[inline]
+    /// Await on the current fiber until latch is set.
+    pub(super) fn try_await_(
+        &self,
+        worker_thread: &WorkerThread,
+    ) -> Result<(), FiberLatchAlreadySetError> {
         let (tx, waker) = worker_thread.fibers.create_waker();
         let mut state = self.state.lock().unwrap();
         match &mut *state {
@@ -232,7 +251,7 @@ impl FiberLatch {
                 registry: Arc::clone(worker_thread.registry()),
                 thread_index: worker_thread.index(),
             }),
-            FiberLatchState::Set => return,
+            FiberLatchState::Set => return Err(FiberLatchAlreadySetError(())),
         }
         drop(state);
 
@@ -271,6 +290,7 @@ impl FiberLatch {
             });
         }
         tlv::set(tlv);
+        Ok(())
     }
 }
 

@@ -6,6 +6,7 @@ use crossbeam_deque::{Injector, Steal};
 use std::any::Any;
 use std::cell::UnsafeCell;
 use std::mem;
+use std::sync::atomic::{self, AtomicUsize};
 use std::sync::Arc;
 
 pub(super) enum JobResult<T> {
@@ -127,6 +128,109 @@ where
         mem::forget(abort);
     }
 }
+
+mod weak_job_state {
+    /// scheduled yet to be executed
+    pub const PENDING: usize = 0;
+    /// parent have met job, either it's retrieved back or parent waits on it
+    pub const MET_PARENT: usize = 1;
+    /// executer have met job, either it's stolen or parent waits on it
+    pub const MET_ADOPTER: usize = 2;
+}
+
+pub(super) struct WeakJob<J> {
+    state: AtomicUsize,
+    inner: *const J,
+}
+
+impl<L, F, R> WeakJob<StackJob<L, F, R>>
+where
+    L: Latch + Sync,
+    F: FnOnce(bool) -> R + Send,
+    R: Send,
+{
+    pub(super) fn new(inner: *const StackJob<L, F, R>) -> Box<Self> {
+        Box::new(Self {
+            state: AtomicUsize::new(weak_job_state::PENDING),
+            inner,
+        })
+    }
+}
+
+impl<J> WeakJob<J>
+where
+    J: Job,
+{
+    pub(super) unsafe fn into_job_ref(self: Box<Self>) -> (RetrieveWeakJob<J>, JobRef) {
+        let ptr = Box::into_raw(self);
+        (RetrieveWeakJob { weak_job: ptr }, JobRef::new(ptr))
+    }
+}
+
+impl<J> Job for WeakJob<J>
+where
+    J: Job,
+{
+    unsafe fn execute(this: *const ()) {
+        let this = this as *const Self;
+        let state = &(*this).state;
+        let old_state = state.fetch_or(weak_job_state::MET_ADOPTER, atomic::Ordering::Relaxed);
+        debug_assert_eq!(
+            old_state & weak_job_state::MET_ADOPTER,
+            0,
+            "tried to execute `WeakJob` twice"
+        );
+
+        if old_state & weak_job_state::MET_PARENT == 0 {
+            let job = (*this).inner;
+            J::execute(job as *const ());
+        } else {
+            drop(Box::from_raw(this as *mut Self));
+        }
+    }
+}
+
+pub(super) struct RetrieveWeakJob<J> {
+    weak_job: *const WeakJob<J>,
+}
+
+impl<L, F, R> RetrieveWeakJob<StackJob<L, F, R>>
+where
+    L: Latch + Sync,
+    F: FnOnce(bool) -> R + Send,
+    R: Send,
+{
+    pub(super) fn try_retrieve(&self) -> Result<(), RetrieveWeakJobError> {
+        unsafe {
+            let state = &(*self.weak_job).state;
+            let old_state = state.fetch_or(weak_job_state::MET_PARENT, atomic::Ordering::Relaxed);
+            debug_assert_eq!(
+                old_state & weak_job_state::MET_PARENT,
+                0,
+                "tried to execute `RetrieveWeakJob` twice"
+            );
+            if old_state & weak_job_state::MET_ADOPTER == 0 {
+                Ok(())
+            } else {
+                drop(Box::from_raw(
+                    self.weak_job as *mut WeakJob<StackJob<L, F, R>>,
+                ));
+                Err(RetrieveWeakJobError(()))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct RetrieveWeakJobError(());
+
+impl std::fmt::Display for RetrieveWeakJobError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        "weak job is already stolen".fmt(f)
+    }
+}
+
+impl std::error::Error for RetrieveWeakJobError {}
 
 /// Represents a job stored in the heap. Used to implement
 /// `scope`. Unlike `StackJob`, when executed, `HeapJob` simply

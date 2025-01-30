@@ -1,4 +1,4 @@
-use crate::job::StackJob;
+use crate::job::{StackJob, WeakJob};
 use crate::latch::FiberLatch;
 use crate::registry::{self, WorkerThread};
 use crate::tlv::{self, Tlv};
@@ -136,8 +136,9 @@ where
         // done here so that the stack frame can keep it all live
         // long enough.
         let job_b = StackJob::new(tlv, call_b(oper_b), FiberLatch::new());
-        let job_b_ref = job_b.as_job_ref();
-        worker_thread.push(job_b_ref);
+        let weak_job_b = WeakJob::new(&job_b);
+        let (retrieve_job_b, weak_job_b_ref) = weak_job_b.into_job_ref();
+        worker_thread.push(weak_job_b_ref);
 
         // Execute task a; hopefully b gets stolen in the meantime.
         let status_a = unwind::halt_unwinding(call_a(oper_a, injected));
@@ -146,43 +147,26 @@ where
             Err(err) => join_recover_from_panic(worker_thread, &job_b.latch, err, tlv),
         };
 
+        // FIXME: Rewrite
         // Now that task A has finished, try to pop job B from the
         // local stack.  It may already have been popped by job A; it
         // may also have been stolen. There may also be some tasks
         // pushed on top of it in the stack, and we will have to pop
         // those off to get to it.
-        if !job_b.latch.probe() {
-            job_b.latch.await_(worker_thread);
-            debug_assert!(job_b.latch.probe());
-            // TODO: try stealing job from queue via a custom new job type
-            // if let Some(job) = worker_thread.take_local_job() {
-            //     if job_b_id == job.id() {
-            //         // Found it! Let's run it.
-            //         //
-            //         // Note that this could panic, but it's ok if we unwind here.
+        let result_b = if retrieve_job_b.try_retrieve().is_ok() {
+            job_b.run_inline(false)
+        } else {
+            if !job_b.latch.probe() {
+                job_b.latch.await_(worker_thread);
+                debug_assert!(job_b.latch.probe());
+            }
+            job_b.into_result()
+        };
 
-            //         // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
-            //         tlv::set(tlv);
+        // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
+        tlv::set(tlv);
 
-            //         let result_b = job_b.run_inline(injected);
-            //         return (result_a, result_b);
-            //     } else {
-            //         worker_thread.execute(job, job_b.latch.as_core_latch());
-            //     }
-            // } else {
-            //     // Local deque is empty. Time to steal from other
-            //     // threads.
-            //     worker_thread.wait_until(&job_b.latch);
-            //     debug_assert!(job_b.latch.probe());
-            //     break;
-            // }
-        }
-
-        // FIXME: delete after elaboration
-        // // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.
-        // tlv::set(tlv);
-
-        (result_a, job_b.into_result())
+        (result_a, result_b)
     })
 }
 
