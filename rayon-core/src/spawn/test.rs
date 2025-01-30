@@ -1,7 +1,8 @@
-use crate::scope;
+use crate::{future::IntoFutureExt, scope};
 use std::any::Any;
-use std::sync::mpsc::channel;
-use std::sync::Mutex;
+
+use async_lock::Mutex;
+use flume::unbounded as channel;
 
 use super::{spawn, spawn_fifo};
 use crate::ThreadPoolBuilder;
@@ -13,7 +14,7 @@ fn spawn_then_join_in_worker() {
     scope(move |_| {
         spawn(move || tx.send(22).unwrap());
     });
-    assert_eq!(22, rx.recv().unwrap());
+    assert_eq!(22, rx.recv_async().await_().unwrap());
 }
 
 #[test]
@@ -21,7 +22,7 @@ fn spawn_then_join_in_worker() {
 fn spawn_then_join_outside_worker() {
     let (tx, rx) = channel();
     spawn(move || tx.send(22).unwrap());
-    assert_eq!(22, rx.recv().unwrap());
+    assert_eq!(22, rx.recv_async().await_().unwrap());
 }
 
 #[test]
@@ -31,7 +32,7 @@ fn panic_fwd() {
 
     let tx = Mutex::new(tx);
     let panic_handler = move |err: Box<dyn Any + Send>| {
-        let tx = tx.lock().unwrap();
+        let tx = tx.lock().await_();
         if let Some(&msg) = err.downcast_ref::<&str>() {
             if msg == "Hello, world!" {
                 tx.send(1).unwrap();
@@ -50,7 +51,7 @@ fn panic_fwd() {
         .unwrap()
         .spawn(move || panic!("Hello, world!"));
 
-    assert_eq!(1, rx.recv().unwrap());
+    assert_eq!(1, rx.recv_async().await_().unwrap());
 }
 
 /// Test what happens when the thread-pool is dropped but there are
@@ -67,7 +68,7 @@ fn termination_while_things_are_executing() {
     {
         let thread_pool = ThreadPoolBuilder::new().build().unwrap();
         thread_pool.spawn(move || {
-            let data = rx0.recv().unwrap();
+            let data = rx0.recv_async().await_().unwrap();
 
             // At this point, we know the "main" reference to the
             // `ThreadPool` has been dropped, but there are still
@@ -79,7 +80,7 @@ fn termination_while_things_are_executing() {
     }
 
     tx0.send(22).unwrap();
-    let v = rx1.recv().unwrap();
+    let v = rx1.recv_async().await_().unwrap();
     assert_eq!(v, 22);
 }
 
@@ -93,7 +94,7 @@ fn custom_panic_handler_and_spawn() {
     // with itself, we have to wrap `tx` in a mutex.
     let tx = Mutex::new(tx);
     let panic_handler = move |e: Box<dyn Any + Send>| {
-        tx.lock().unwrap().send(e).unwrap();
+        tx.lock().await_().send(e).unwrap();
     };
 
     // Execute an async that will panic.
@@ -103,7 +104,7 @@ fn custom_panic_handler_and_spawn() {
     });
 
     // Check that we got back the panic we expected.
-    let error = rx.recv().unwrap();
+    let error = rx.recv_async().await_().unwrap();
     if let Some(&msg) = error.downcast_ref::<&str>() {
         assert_eq!(msg, "Hello, world!");
     } else {
@@ -121,7 +122,7 @@ fn custom_panic_handler_and_nested_spawn() {
     // with itself, we have to wrap `tx` in a mutex.
     let tx = Mutex::new(tx);
     let panic_handler = move |e| {
-        tx.lock().unwrap().send(e).unwrap();
+        tx.lock().await_().send(e).unwrap();
     };
 
     // Execute an async that will (eventually) panic.
@@ -139,7 +140,7 @@ fn custom_panic_handler_and_nested_spawn() {
 
     // Check that we get back the panics we expected.
     for _ in 0..PANICS {
-        let error = rx.recv().unwrap();
+        let error = rx.recv_async().await_().unwrap();
         if let Some(&msg) = error.downcast_ref::<&str>() {
             assert_eq!(msg, "Hello, world!");
         } else {

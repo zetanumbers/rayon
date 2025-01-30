@@ -27,6 +27,8 @@ lock_api = "0.4.12"
 futures-lite = { version = "1.13.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+async-lock = "3.2.0"
+flume = "0.11.1"
 rand = "0.8"
 rand_xorshift = "0.3"
 scoped-tls = "1.0"

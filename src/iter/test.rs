@@ -12,7 +12,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::collections::{BinaryHeap, VecDeque};
 use std::f64;
 use std::fmt::Debug;
-use std::sync::mpsc;
 use std::usize;
 
 fn is_indexed<T: IndexedParallelIterator>(_: T) {}
@@ -1680,7 +1679,7 @@ fn check_lengths() {
 
 #[test]
 fn check_map_with() {
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = flume::unbounded();
     let a: HashSet<_> = (0..1024).collect();
 
     a.par_iter()
@@ -1694,7 +1693,7 @@ fn check_map_with() {
 
 #[test]
 fn check_fold_with() {
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = flume::unbounded();
     let a: HashSet<_> = (0..1024).collect();
 
     a.par_iter()
@@ -1711,7 +1710,7 @@ fn check_fold_with() {
 
 #[test]
 fn check_for_each_with() {
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = flume::unbounded();
     let a: HashSet<_> = (0..1024).collect();
 
     a.par_iter()

@@ -1,9 +1,12 @@
 #![cfg(test)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::channel;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use async_lock::Mutex;
+use flume::unbounded as channel;
+
+use crate::future::IntoFutureExt;
 use crate::{join, Scope, ScopeFifo, ThreadPool, ThreadPoolBuilder};
 
 #[test]
@@ -217,11 +220,11 @@ macro_rules! test_scope_order {
                 let vec = &vec;
                 for i in 0..10 {
                     scope.$spawn(move |_| {
-                        vec.lock().unwrap().push(i);
+                        vec.lock().await_().push(i);
                     });
                 }
             });
-            vec.into_inner().unwrap()
+            vec.into_inner()
         })
     }};
 }
@@ -353,6 +356,7 @@ fn nested_fifo_scopes() {
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn in_place_scope_no_deadlock() {
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = &pool;
     let (tx, rx) = channel();
     let rx_ref = &rx;
     pool.in_place_scope(move |s| {
@@ -361,7 +365,7 @@ fn in_place_scope_no_deadlock() {
         s.spawn(move |_| {
             tx.send(()).unwrap();
         });
-        rx_ref.recv().unwrap();
+        pool.install(|| rx_ref.recv_async().await_().unwrap());
     });
 }
 
@@ -369,6 +373,7 @@ fn in_place_scope_no_deadlock() {
 #[cfg_attr(any(target_os = "emscripten", target_family = "wasm"), ignore)]
 fn in_place_scope_fifo_no_deadlock() {
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = &pool;
     let (tx, rx) = channel();
     let rx_ref = &rx;
     pool.in_place_scope_fifo(move |s| {
@@ -377,16 +382,16 @@ fn in_place_scope_fifo_no_deadlock() {
         s.spawn_fifo(move |_| {
             tx.send(()).unwrap();
         });
-        rx_ref.recv().unwrap();
+        pool.install(|| rx_ref.recv_async().await_().unwrap());
     });
 }
 
 #[test]
 fn yield_now_to_spawn() {
-    let (tx, rx) = crossbeam_channel::bounded(1);
+    let (tx, rx) = flume::bounded(1);
 
     // Queue a regular spawn.
-    crate::spawn(move || tx.send(22).unwrap());
+    crate::spawn(move || tx.send_async(22).await_().unwrap());
 
     // The single-threaded fallback mode (for wasm etc.) won't
     // get a chance to run the spawn if we never yield to it.
@@ -396,15 +401,15 @@ fn yield_now_to_spawn() {
 
     // The spawn **must** have started by now, but we still might have to wait
     // for it to finish if a different thread stole it first.
-    assert_eq!(22, rx.recv().unwrap());
+    assert_eq!(22, rx.recv_async().await_().unwrap());
 }
 
 #[test]
 fn yield_local_to_spawn() {
-    let (tx, rx) = crossbeam_channel::bounded(1);
+    let (tx, rx) = flume::bounded(1);
 
     // Queue a regular spawn.
-    crate::spawn(move || tx.send(22).unwrap());
+    crate::spawn(move || tx.send_async(22).await_().unwrap());
 
     // The single-threaded fallback mode (for wasm etc.) won't
     // get a chance to run the spawn if we never yield to it.
@@ -414,5 +419,5 @@ fn yield_local_to_spawn() {
 
     // The spawn **must** have started by now, but we still might have to wait
     // for it to finish if a different thread stole it first.
-    assert_eq!(22, rx.recv().unwrap());
+    assert_eq!(22, rx.recv_async().await_().unwrap());
 }

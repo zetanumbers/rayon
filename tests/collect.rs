@@ -1,9 +1,10 @@
+use async_lock::Mutex;
+use rayon::future::IntoFutureExt;
 use rayon::prelude::*;
 
 use std::panic;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Mutex;
 
 #[test]
 #[cfg_attr(not(panic = "unwind"), ignore)]
@@ -12,7 +13,7 @@ fn collect_drop_on_unwind() {
 
     impl<'a> Drop for Recorddrop<'a> {
         fn drop(&mut self) {
-            self.1.lock().unwrap().push(self.0);
+            self.1.lock().await_().push(self.0);
         }
     }
 
@@ -35,7 +36,7 @@ fn collect_drop_on_unwind() {
                         panic!("unwinding for test");
                     }
                     let elt = a + b;
-                    inserts.lock().unwrap().push(elt);
+                    inserts.lock().await_().push(elt);
                     Recorddrop(elt, &drops)
                 })
                 .collect_into_vec(&mut result);
@@ -44,8 +45,8 @@ fn collect_drop_on_unwind() {
             assert_eq!(a.len(), result.len());
         }));
 
-        let inserts = inserts.get_mut().unwrap();
-        let drops = drops.get_mut().unwrap();
+        let inserts = inserts.get_mut();
+        let drops = drops.get_mut();
         println!("{:?}", inserts);
         println!("{:?}", drops);
 
