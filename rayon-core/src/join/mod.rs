@@ -154,7 +154,7 @@ where
         // pushed on top of it in the stack, and we will have to pop
         // those off to get to it.
         let result_b = if retrieve_job_b.try_retrieve().is_ok() {
-            job_b.run_inline(false)
+            job_b.run_inline(injected)
         } else {
             if !job_b.latch.probe() {
                 job_b.latch.await_(worker_thread);
