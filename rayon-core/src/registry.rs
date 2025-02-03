@@ -901,27 +901,8 @@ impl WorkerThread {
 
         let mut idle_state = self.registry.sleep.start_looking(self.index, latch);
         while !latch.probe() {
-            match self.fibers.scheduled.try_recv() {
-                Ok(rx) => match rx.try_recv() {
-                    Ok(Some(fiber)) => {
-                        let wt = ptr::addr_of!(*self);
-                        let tlv = tlv::get();
-                        let Ready = fiber.switch(move |prev| {
-                            (*wt).fibers.free.borrow_mut().push(prev);
-                            Pending
-                        });
-                        tlv::set(tlv);
-                        continue;
-                    }
-                    Ok(None) => continue,
-                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
-                        unreachable!("expected fiber wasn't scheduled")
-                    }
-                },
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    unreachable!("fiber scheduler is disconnected")
-                }
-                Err(mpsc::TryRecvError::Empty) => (),
+            if self.process_fiber() {
+                continue;
             }
             if let Some(job) = self.find_work() {
                 self.registry.sleep.work_found(idle_state);
@@ -944,6 +925,32 @@ impl WorkerThread {
             latch_addr: latch.addr(),
         });
         mem::forget(abort_guard); // successful execution, do not abort
+    }
+
+    fn process_fiber(&self) -> bool {
+        match self.fibers.scheduled.try_recv() {
+            Ok(rx) => match rx.try_recv() {
+                Ok(Some(fiber)) => {
+                    let wt = ptr::addr_of!(*self);
+                    let tlv = tlv::get();
+                    let Ready = fiber.switch(move |prev| {
+                        unsafe { (*wt).fibers.free.borrow_mut().push(prev) };
+                        Pending
+                    });
+                    tlv::set(tlv);
+                    return true;
+                }
+                Ok(None) => return true,
+                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
+                    unreachable!("expected fiber wasn't scheduled")
+                }
+            },
+            Err(mpsc::TryRecvError::Disconnected) => {
+                unreachable!("fiber scheduler is disconnected")
+            }
+            Err(mpsc::TryRecvError::Empty) => (),
+        }
+        false
     }
 
     fn find_work(&self) -> Option<JobRef> {
@@ -1043,8 +1050,11 @@ unsafe fn main_loop(thread: ThreadBuilder) {
     });
     registry.acquire_thread();
     worker_thread.work_until(my_terminate_latch);
+    while let Some(job) = worker_thread.take_local_job() {
+        worker_thread.execute(job);
+    }
+    while worker_thread.process_fiber() {}
 
-    // Should not be any work left in our queue.
     debug_assert!(worker_thread.take_local_job().is_none());
 
     // let registry know we are done

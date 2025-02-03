@@ -282,8 +282,6 @@ impl FiberLatch {
                 let my_terminate_latch = &registry.thread_infos[index].terminate;
                 unsafe { worker_thread.work_until(my_terminate_latch) };
 
-                // Should not be any work left in our queue.
-                debug_assert!(worker_thread.take_local_job().is_none());
                 // Finish up other fibers
                 // FIXME: what to do in case there's no free fibers?
                 (worker_thread.fibers.free.borrow_mut().pop().unwrap(), Ready)

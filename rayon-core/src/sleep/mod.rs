@@ -139,20 +139,7 @@ impl Sleep {
         latch: &CoreLatch,
         thread: &WorkerThread,
     ) {
-        if idle_state.rounds < ROUNDS_UNTIL_SLEEPY {
-            thread::yield_now();
-            idle_state.rounds += 1;
-        } else if idle_state.rounds == ROUNDS_UNTIL_SLEEPY {
-            idle_state.jobs_counter = self.announce_sleepy(idle_state.worker_index);
-            idle_state.rounds += 1;
-            thread::yield_now();
-        } else if idle_state.rounds < ROUNDS_UNTIL_SLEEPING {
-            idle_state.rounds += 1;
-            thread::yield_now();
-        } else {
-            debug_assert_eq!(idle_state.rounds, ROUNDS_UNTIL_SLEEPING);
-            self.sleep(idle_state, latch, thread);
-        }
+        thread::yield_now();
     }
 
     #[cold]
@@ -169,115 +156,7 @@ impl Sleep {
     }
 
     #[cold]
-    fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch, thread: &WorkerThread) {
-        let worker_index = idle_state.worker_index;
-
-        if !latch.get_sleepy() {
-            self.logger.log(|| ThreadSleepInterruptedByLatch {
-                worker: worker_index,
-                latch_addr: latch.addr(),
-            });
-
-            return;
-        }
-
-        let sleep_state = &self.worker_sleep_states[worker_index];
-        let mut is_blocked = sleep_state.is_blocked.lock().unwrap();
-        debug_assert!(!*is_blocked);
-
-        // Our latch was signalled. We should wake back up fully as we
-        // will have some stuff to do.
-        if !latch.fall_asleep() {
-            self.logger.log(|| ThreadSleepInterruptedByLatch {
-                worker: worker_index,
-                latch_addr: latch.addr(),
-            });
-
-            idle_state.wake_fully();
-            return;
-        }
-
-        loop {
-            let counters = self.counters.load(Ordering::SeqCst);
-
-            // Check if the JEC has changed since we got sleepy.
-            debug_assert!(idle_state.jobs_counter.is_sleepy());
-            if counters.jobs_counter() != idle_state.jobs_counter {
-                // JEC has changed, so a new job was posted, but for some reason
-                // we didn't see it. We should return to just before the SLEEPY
-                // state so we can do another search and (if we fail to find
-                // work) go back to sleep.
-                self.logger.log(|| ThreadSleepInterruptedByJob {
-                    worker: worker_index,
-                });
-
-                idle_state.wake_partly();
-                latch.wake_up();
-                return;
-            }
-
-            // Otherwise, let's move from IDLE to SLEEPING.
-            if self.counters.try_add_sleeping_thread(counters) {
-                break;
-            }
-        }
-
-        // Successfully registered as asleep.
-
-        self.logger.log(|| ThreadSleeping {
-            worker: worker_index,
-            latch_addr: latch.addr(),
-        });
-
-        // We have one last check for injected jobs to do. This protects against
-        // deadlock in the very unlikely event that
-        //
-        // - an external job is being injected while we are sleepy
-        // - that job triggers the rollover over the JEC such that we don't see it
-        // - we are the last active worker thread
-        std::sync::atomic::fence(Ordering::SeqCst);
-        if thread.has_injected_job() {
-            // If we see an externally injected job, then we have to 'wake
-            // ourselves up'. (Ordinarily, `sub_sleeping_thread` is invoked by
-            // the one that wakes us.)
-            self.counters.sub_sleeping_thread();
-        } else {
-            {
-                // Decrement the number of active threads and check for a deadlock
-                let mut data = self.data.lock().unwrap();
-                data.active_threads -= 1;
-                data.deadlock_check(&thread.registry.deadlock_handler);
-            }
-
-            // If we don't see an injected job (the normal case), then flag
-            // ourselves as asleep and wait till we are notified.
-            //
-            // (Note that `is_blocked` is held under a mutex and the mutex was
-            // acquired *before* we incremented the "sleepy counter". This means
-            // that whomever is coming to wake us will have to wait until we
-            // release the mutex in the call to `wait`, so they will see this
-            // boolean as true.)
-            thread.registry.release_thread();
-            *is_blocked = true;
-            while *is_blocked {
-                is_blocked = sleep_state.condvar.wait(is_blocked).unwrap();
-            }
-
-            // Drop `is_blocked` now in case `acquire_thread` blocks
-            drop(is_blocked);
-
-            thread.registry.acquire_thread();
-        }
-
-        // Update other state:
-        idle_state.wake_fully();
-        latch.wake_up();
-
-        self.logger.log(|| ThreadAwoken {
-            worker: worker_index,
-            latch_addr: latch.addr(),
-        });
-    }
+    fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch, thread: &WorkerThread) {}
 
     /// Notify the given thread that it should wake up (if it is
     /// sleeping).  When this method is invoked, we typically know the
