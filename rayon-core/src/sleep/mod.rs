@@ -423,6 +423,10 @@ impl Sleep {
         let mut is_blocked = sleep_state.is_blocked.lock().unwrap();
         if *is_blocked {
             *is_blocked = false;
+
+            // Increment the number of active threads
+            self.data.lock().unwrap().active_threads += 1;
+
             sleep_state.condvar.notify_one();
 
             // When the thread went to sleep, it will have incremented
@@ -435,9 +439,6 @@ impl Sleep {
             // wake, when in fact there is nothing left for them to
             // do.
             self.counters.sub_sleeping_thread();
-
-            // Increment the number of active threads
-            self.data.lock().unwrap().active_threads += 1;
 
             self.logger.log(|| ThreadNotify { worker: index });
 
