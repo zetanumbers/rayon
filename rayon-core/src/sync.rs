@@ -10,6 +10,8 @@ use crate::{
     registry::WorkerThread,
 };
 
+pub use lock_api;
+
 pub struct RawMutex {
     latch: FiberLatch,
 }
