@@ -169,19 +169,34 @@ enum FiberLatchState {
     Set,
 }
 
-struct FiberWaiter {
-    waker: FiberWaker,
-    registry: Arc<Registry>,
-    thread_index: usize,
+enum FiberWaiter {
+    InWorker {
+        waker: FiberWaker,
+        registry: Arc<Registry>,
+        thread_index: usize,
+    },
+    Outside {
+        notify: mpsc::SyncSender<()>,
+    },
 }
 
 impl std::fmt::Debug for FiberWaiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FiberWaiter")
-            .field("waker", &self.waker)
-            .field("registry", &format_args!("Registry({:p})", self.registry))
-            .field("thread_index", &self.thread_index)
-            .finish()
+        match self {
+            FiberWaiter::InWorker {
+                waker,
+                registry,
+                thread_index,
+            } => f
+                .debug_struct("InWorker")
+                .field("waker", waker)
+                .field("registry", &format_args!("Registry({:p})", registry))
+                .field("thread_index", thread_index)
+                .finish(),
+            FiberWaiter::Outside { notify } => {
+                f.debug_struct("Outside").field("notify", notify).finish()
+            }
+        }
     }
 }
 
@@ -233,7 +248,7 @@ impl FiberLatch {
     }
 
     #[inline]
-    pub(super) fn await_(&self, worker_thread: &WorkerThread) {
+    pub(super) fn await_(&self, worker_thread: Option<&WorkerThread>) {
         let _ = self.try_await_(worker_thread);
     }
 
@@ -241,51 +256,99 @@ impl FiberLatch {
     /// Await on the current fiber until latch is set.
     pub(super) fn try_await_(
         &self,
-        worker_thread: &WorkerThread,
+        worker_thread: Option<&WorkerThread>,
     ) -> Result<(), FiberLatchAlreadySetError> {
-        let (tx, waker) = worker_thread.fibers.create_waker();
+        enum AwaitOptions<'a> {
+            InWorker {
+                tx: mpsc::SyncSender<Option<corosensei::Fiber<Pending>>>,
+                waker: Option<FiberWaker>,
+                worker_thread: &'a WorkerThread,
+            },
+            Outside {
+                notify: Option<mpsc::SyncSender<()>>,
+                wait: mpsc::Receiver<()>,
+            },
+        }
+
+        let mut opts = match worker_thread {
+            Some(worker_thread) => {
+                let (tx, waker) = worker_thread.fibers.create_waker();
+                AwaitOptions::InWorker {
+                    tx,
+                    waker: Some(waker),
+                    worker_thread,
+                }
+            }
+            None => {
+                let (notify, wait) = mpsc::sync_channel(1);
+                AwaitOptions::Outside {
+                    notify: Some(notify),
+                    wait,
+                }
+            }
+        };
         let mut state = self.state.lock().unwrap();
-        match &mut *state {
-            FiberLatchState::Waiting { waiters } => waiters.push(FiberWaiter {
-                waker,
+        match (&mut *state, &mut opts) {
+            (
+                FiberLatchState::Waiting { waiters },
+                AwaitOptions::InWorker {
+                    waker,
+                    worker_thread,
+                    ..
+                },
+            ) => waiters.push(FiberWaiter::InWorker {
+                waker: waker.take().unwrap(),
                 registry: Arc::clone(worker_thread.registry()),
                 thread_index: worker_thread.index(),
             }),
-            FiberLatchState::Set => return Err(FiberLatchAlreadySetError(())),
+            (FiberLatchState::Waiting { waiters }, AwaitOptions::Outside { notify, .. }) => waiters
+                .push(FiberWaiter::Outside {
+                    notify: notify.take().unwrap(),
+                }),
+            (FiberLatchState::Set, _) => return Err(FiberLatchAlreadySetError(())),
         }
         drop(state);
 
-        let schedule_fiber = move |prev| match tx.try_send(Some(prev)) {
-            Ok(()) => Ready,
-            Err(mpsc::TrySendError::Full(_)) => {
-                unreachable!("oneshot fiber channel is full")
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                panic!("fiber waker was dropped")
-            }
-        };
-        let free_fiber = worker_thread.fibers.free.borrow_mut().pop();
         let tlv = tlv::get();
-        if let Some(free_fiber) = free_fiber {
-            let Pending = free_fiber.switch(schedule_fiber);
-        } else {
-            let wt = ptr::addr_of!(*worker_thread);
-            let Pending = fiber().switch(move |prev| {
-                // Worker thread should not panic. If it does, fiber will just abort by default.
+        match opts {
+            AwaitOptions::InWorker {
+                tx, worker_thread, ..
+            } => {
+                let schedule_fiber = move |prev| match tx.try_send(Some(prev)) {
+                    Ok(()) => Ready,
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        unreachable!("oneshot fiber channel is full")
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        panic!("fiber waker was dropped")
+                    }
+                };
+                let free_fiber = worker_thread.fibers.free.borrow_mut().pop();
+                if let Some(free_fiber) = free_fiber {
+                    let Pending = free_fiber.switch(schedule_fiber);
+                } else {
+                    let wt = ptr::addr_of!(*worker_thread);
+                    let Pending = fiber().switch(move |prev| {
+                        // Worker thread should not panic. If it does, fiber will just abort by default.
 
-                let Ready = schedule_fiber(prev);
+                        let Ready = schedule_fiber(prev);
 
-                let worker_thread = unsafe { &*wt };
-                let registry = &*worker_thread.registry;
-                let index = worker_thread.index;
+                        let worker_thread = unsafe { &*wt };
+                        let registry = &*worker_thread.registry;
+                        let index = worker_thread.index;
 
-                let my_terminate_latch = &registry.thread_infos[index].terminate;
-                unsafe { worker_thread.work_until(my_terminate_latch) };
+                        let my_terminate_latch = &registry.thread_infos[index].terminate;
+                        unsafe { worker_thread.work_until(my_terminate_latch) };
 
-                // Finish up other fibers
-                // FIXME: what to do in case there's no free fibers?
-                (worker_thread.fibers.free.borrow_mut().pop().unwrap(), Ready)
-            });
+                        // Finish up other fibers
+                        // FIXME: what to do in case there's no free fibers?
+                        (worker_thread.fibers.free.borrow_mut().pop().unwrap(), Ready)
+                    });
+                }
+            }
+            AwaitOptions::Outside { wait, .. } => {
+                wait.recv().expect("notify channel is dropped while awaiting on FiberLatch outside of the rayon worker")
+            },
         }
         tlv::set(tlv);
         Ok(())
@@ -299,10 +362,19 @@ impl Latch for FiberLatch {
         match old_state {
             FiberLatchState::Waiting { waiters } => {
                 for waiter in waiters {
-                    waiter.waker.wake();
-                    waiter
-                        .registry
-                        .notify_worker_latch_is_set(waiter.thread_index);
+                    match waiter {
+                        FiberWaiter::InWorker {
+                            waker,
+                            registry,
+                            thread_index,
+                        } => {
+                            waker.wake();
+                            registry.notify_worker_latch_is_set(thread_index);
+                        }
+                        FiberWaiter::Outside { notify } => {
+                            let _ = notify.send(());
+                        }
+                    }
                 }
             }
             FiberLatchState::Set => (),

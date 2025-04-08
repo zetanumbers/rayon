@@ -36,7 +36,7 @@ impl<F: IntoFuture> IntoFutureExt for F {
             if let Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
                 return out;
             }
-            unsafe { rayon_waker.latch.await_(&*wt) };
+            unsafe { rayon_waker.latch.await_(Some(&*wt)) };
         }
     }
 }

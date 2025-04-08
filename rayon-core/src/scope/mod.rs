@@ -804,7 +804,7 @@ impl ScopeLatch {
                 let owner = owner.expect("owner thread");
                 debug_assert_eq!(registry.id(), owner.registry().id());
                 debug_assert_eq!(*worker_index, owner.index());
-                latch.as_fiber_latch().await_(owner);
+                latch.as_fiber_latch().await_(Some(owner));
             }
             ScopeLatch::Blocking { latch } => latch.wait(),
         }

@@ -598,7 +598,7 @@ impl Registry {
             latch,
         );
         self.inject(job.as_job_ref());
-        job.latch.await_(&current_thread);
+        job.latch.await_(Some(&current_thread));
         job.into_result()
     }
 

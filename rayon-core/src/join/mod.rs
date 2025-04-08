@@ -157,7 +157,7 @@ where
             job_b.run_inline(injected)
         } else {
             if !job_b.latch.probe() {
-                job_b.latch.await_(worker_thread);
+                job_b.latch.await_(Some(worker_thread));
                 debug_assert!(job_b.latch.probe());
             }
             job_b.into_result()
@@ -180,7 +180,7 @@ unsafe fn join_recover_from_panic(
     err: Box<dyn Any + Send>,
     tlv: Tlv,
 ) -> ! {
-    job_b_latch.await_(&worker_thread);
+    job_b_latch.await_(Some(&worker_thread));
 
     // FIXME: delete after elaboration
     // // Restore the TLV since we might have run some jobs overwriting it when waiting for job b.

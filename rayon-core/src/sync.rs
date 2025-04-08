@@ -68,7 +68,7 @@ impl Condvar {
             todo!("awaiting outside of the worker")
         }
         mutex.unlock();
-        self.latch.await_(&*wt);
+        self.latch.await_(Some(&*wt));
         mutex.lock();
     }
 
@@ -230,9 +230,6 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 }
 
 fn latch_await(latch: &FiberLatch) {
-    let wt = WorkerThread::current();
-    if wt.is_null() {
-        todo!("awaiting outside of the worker")
-    }
-    latch.await_(unsafe { &*wt });
+    let wt = unsafe { WorkerThread::current().as_ref() };
+    latch.await_(wt);
 }
