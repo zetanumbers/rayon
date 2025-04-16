@@ -70,9 +70,8 @@ use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::thread;
 
-#[macro_use]
-mod log;
 #[macro_use]
 mod private;
 
@@ -233,7 +232,7 @@ type DeadlockHandler = dyn Fn() + Send + Sync;
 type StartHandler = dyn Fn(usize) + Send + Sync;
 
 /// The type for a closure that gets invoked when a thread exits. The
-/// closure is passed the index of the thread on which is is invoked.
+/// closure is passed the index of the thread on which it is invoked.
 /// Note that this same closure may be invoked multiple times in parallel.
 type ExitHandler = dyn Fn(usize) + Send + Sync;
 
@@ -309,12 +308,12 @@ where
 impl ThreadPoolBuilder {
     /// Creates a scoped `ThreadPool` initialized using this configuration.
     ///
-    /// This is a convenience function for building a pool using [`crossbeam::scope`]
+    /// This is a convenience function for building a pool using [`std::thread::scope`]
     /// to spawn threads in a [`spawn_handler`](#method.spawn_handler).
     /// The threads in this pool will start by calling `wrapper`, which should
     /// do initialization and continue by calling `ThreadBuilder::run()`.
     ///
-    /// [`crossbeam::scope`]: https://docs.rs/crossbeam/0.8/crossbeam/fn.scope.html
+    /// [`std::thread::scope`]: https://doc.rust-lang.org/std/thread/fn.scope.html
     ///
     /// # Examples
     ///
@@ -349,18 +348,17 @@ impl ThreadPoolBuilder {
         W: Fn(ThreadBuilder) + Sync, // expected to call `run()`
         F: FnOnce(&ThreadPool) -> R,
     {
-        let result = crossbeam_utils::thread::scope(|scope| {
-            let wrapper = &wrapper;
+        std::thread::scope(|scope| {
             let pool = self
                 .spawn_handler(|thread| {
-                    let mut builder = scope.builder();
+                    let mut builder = std::thread::Builder::new();
                     if let Some(name) = thread.name() {
                         builder = builder.name(name.to_string());
                     }
                     if let Some(size) = thread.stack_size() {
                         builder = builder.stack_size(size);
                     }
-                    builder.spawn(move |_| wrapper(thread))?;
+                    builder.spawn_scoped(scope, || wrapper(thread))?;
                     Ok(())
                 })
                 .build()?;
@@ -370,12 +368,7 @@ impl ThreadPoolBuilder {
                 Ok(result) => Ok(result),
                 Err(err) => unwind::resume_unwinding(err),
             }
-        });
-
-        match result {
-            Ok(result) => result,
-            Err(err) => unwind::resume_unwinding(err),
-        }
+        })
     }
 }
 
@@ -384,12 +377,10 @@ impl<S> ThreadPoolBuilder<S> {
     ///
     /// Note that the threads will not exit until after the pool is dropped. It
     /// is up to the caller to wait for thread termination if that is important
-    /// for any invariants. For instance, threads created in [`crossbeam::scope`]
+    /// for any invariants. For instance, threads created in [`std::thread::scope`]
     /// will be joined before that scope returns, and this will block indefinitely
     /// if the pool is leaked. Furthermore, the global thread pool doesn't terminate
     /// until the entire process exits!
-    ///
-    /// [`crossbeam::scope`]: https://docs.rs/crossbeam/0.8/crossbeam/fn.scope.html
     ///
     /// # Examples
     ///
@@ -439,6 +430,7 @@ impl<S> ThreadPoolBuilder<S> {
     /// or [`std::thread::scope`] introduced in Rust 1.63, which is encapsulated in
     /// [`build_scoped`](#method.build_scoped).
     ///
+    /// [`crossbeam::scope`]: https://docs.rs/crossbeam/0.8/crossbeam/fn.scope.html
     /// [`std::thread::scope`]: https://doc.rust-lang.org/std/thread/fn.scope.html
     ///
     /// ```
@@ -498,12 +490,18 @@ impl<S> ThreadPoolBuilder<S> {
         if self.num_threads > 0 {
             self.num_threads
         } else {
+            let default = || {
+                thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+            };
+
             match env::var("RAYON_NUM_THREADS")
                 .ok()
                 .and_then(|s| usize::from_str(&s).ok())
             {
-                Some(x) if x > 0 => return x,
-                Some(x) if x == 0 => return num_cpus::get(),
+                Some(x @ 1..) => return x,
+                Some(0) => return default(),
                 _ => {}
             }
 
@@ -512,8 +510,8 @@ impl<S> ThreadPoolBuilder<S> {
                 .ok()
                 .and_then(|s| usize::from_str(&s).ok())
             {
-                Some(x) if x > 0 => x,
-                _ => num_cpus::get(),
+                Some(x @ 1..) => x,
+                _ => default(),
             }
         }
     }
@@ -552,9 +550,8 @@ impl<S> ThreadPoolBuilder<S> {
     /// may change in the future, if you wish to rely on a fixed
     /// number of threads, you should use this function to specify
     /// that number. To reproduce the current default behavior, you
-    /// may wish to use the [`num_cpus`
-    /// crate](https://crates.io/crates/num_cpus) to query the number
-    /// of CPUs dynamically.
+    /// may wish to use [`std::thread::available_parallelism`]
+    /// to query the number of CPUs dynamically.
     ///
     /// **Old environment variable:** `RAYON_NUM_THREADS` is a one-to-one
     /// replacement of the now deprecated `RAYON_RS_NUM_CPUS` environment

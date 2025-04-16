@@ -27,7 +27,7 @@ pub(super) struct Counters {
 pub(super) struct JobsEventCounter(usize);
 
 impl JobsEventCounter {
-    pub(super) const DUMMY: JobsEventCounter = JobsEventCounter(std::usize::MAX);
+    pub(super) const DUMMY: JobsEventCounter = JobsEventCounter(usize::MAX);
 
     #[inline]
     pub(super) fn as_usize(self) -> usize {
@@ -166,7 +166,7 @@ impl AtomicCounters {
         // Current heuristic: whenever an inactive thread goes away, if
         // there are any sleeping threads, wake 'em up.
         let sleeping_threads = old_value.sleeping_threads();
-        std::cmp::min(sleeping_threads, 2)
+        Ord::min(sleeping_threads, 2)
     }
 
     /// Subtracts a sleeping thread. This cannot fail, but it is only
@@ -212,12 +212,12 @@ impl AtomicCounters {
 
 #[inline]
 fn select_thread(word: usize, shift: usize) -> usize {
-    ((word >> shift) as usize) & THREADS_MAX
+    (word >> shift) & THREADS_MAX
 }
 
 #[inline]
 fn select_jec(word: usize) -> usize {
-    (word >> JEC_SHIFT) as usize
+    word >> JEC_SHIFT
 }
 
 impl Counters {

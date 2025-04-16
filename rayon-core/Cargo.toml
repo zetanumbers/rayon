@@ -1,13 +1,13 @@
 [package]
 name = "rustc-rayon-core"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Niko Matsakis <niko@alum.mit.edu>",
            "Josh Stone <cuviper@gmail.com>"]
 description = "Core APIs for Rayon - fork for rustc"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rust-lang/rustc-rayon"
 documentation = "https://docs.rs/rustc-rayon-core/"
-rust-version = "1.59"
+rust-version = "1.63"
 edition = "2021"
 readme = "README.md"
 keywords = ["parallel", "thread", "concurrency", "join", "performance"]
@@ -18,14 +18,12 @@ name = "rayon_core"
 
 # Some dependencies may not be their latest version, in order to support older rustc.
 [dependencies]
-num_cpus = "1.2"
-crossbeam-channel = "0.5.0"
 crossbeam-deque = "0.8.1"
 crossbeam-utils = "0.8.0"
 
 [dev-dependencies]
-rand = "0.8"
-rand_xorshift = "0.3"
+rand = "0.9"
+rand_xorshift = "0.4"
 scoped-tls = "1.0"
 
 [target.'cfg(unix)'.dev-dependencies]
