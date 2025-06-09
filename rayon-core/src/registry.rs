@@ -4,8 +4,8 @@ use crate::sleep::Sleep;
 use crate::tlv::Tlv;
 use crate::unwind;
 use crate::{
-    AcquireThreadHandler, DeadlockHandler, ErrorKind, ExitHandler, PanicHandler,
-    ReleaseThreadHandler, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
+    AcquireThreadHandler, ErrorKind, ExitHandler, PanicHandler, ReleaseThreadHandler, StartHandler,
+    ThreadPoolBuildError, ThreadPoolBuilder, Yield,
 };
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use std::cell::Cell;
@@ -133,7 +133,6 @@ pub struct Registry {
     injected_jobs: Injector<JobRef>,
     broadcasts: Mutex<Vec<Worker<JobRef>>>,
     panic_handler: Option<Box<PanicHandler>>,
-    pub(crate) deadlock_handler: Option<Box<DeadlockHandler>>,
     start_handler: Option<Box<StartHandler>>,
     exit_handler: Option<Box<ExitHandler>>,
     pub(crate) acquire_thread_handler: Option<Box<AcquireThreadHandler>>,
@@ -299,7 +298,6 @@ impl Registry {
             broadcasts: Mutex::new(broadcasts),
             terminate_count: AtomicUsize::new(1),
             panic_handler: builder.take_panic_handler(),
-            deadlock_handler: builder.take_deadlock_handler(),
             start_handler: builder.take_start_handler(),
             exit_handler: builder.take_exit_handler(),
             acquire_thread_handler: builder.take_acquire_thread_handler(),
@@ -628,24 +626,6 @@ impl Registry {
     pub(super) fn notify_worker_latch_is_set(&self, target_worker_index: usize) {
         self.sleep.notify_worker_latch_is_set(target_worker_index);
     }
-}
-
-/// Mark a Rayon worker thread as blocked. This triggers the deadlock handler
-/// if no other worker thread is active
-#[inline]
-pub fn mark_blocked() {
-    let worker_thread = WorkerThread::current();
-    assert!(!worker_thread.is_null());
-    unsafe {
-        let registry = &(*worker_thread).registry;
-        registry.sleep.mark_blocked(&registry.deadlock_handler)
-    }
-}
-
-/// Mark a previously blocked Rayon worker thread as unblocked
-#[inline]
-pub fn mark_unblocked(registry: &Registry) {
-    registry.sleep.mark_unblocked()
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
